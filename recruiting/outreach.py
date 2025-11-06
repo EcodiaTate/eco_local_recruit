@@ -23,10 +23,11 @@ SENDER_LOGO = os.getenv(
 MAX_ATTEMPTS = int(os.getenv("ECO_LOCAL_MAX_ATTEMPTS", "3"))
 
 GOAL = (
-    "Primary goal: Get business partners excited about and joined up to ECO Local. These prospects can either signup by themselves,"
-    "using the links below, or they can book an in person or phone call meeting. If they want to chat first."
-    "Offer a meeting if they ask/need it or show preference for a chat. A call is also an option and should be booked the same as an in person meeting, but with the phone number attached (ask for number if not provided)\n\n"
-    "b) Links: https://ecodia.au/eco-local as the main CTA; but you can also https://ecodia.au/join if you want."
+    "Primary goal: Get business partners excited about and joined up to ECO Local. These prospects can either signup by themselves, "
+    "using the links below, or they can book an in person or phone call meeting if they want to chat first. "
+    "Offer a meeting if they ask/need it or show preference for a chat. A call is also an option and should be booked the same as an in person meeting, "
+    "but with the phone number attached (ask for number if not provided)\n\n"
+    "b) Links: https://ecodia.au/eco-local as the main CTA; but you can also use https://ecodia.au/join if you want."
 )
 
 # ---------- utilities ----------
@@ -66,6 +67,7 @@ def _prospect_projection(p: Dict[str, Any]) -> Dict[str, Any]:
         "category": p.get("category"),
         "qualification_score": p.get("qualification_score"),
         "attempt_count": p.get("attempt_count"),
+        "thread_id": p.get("thread_id"),
     }
 
 def _coerce_subject_html(obj: Dict[str, Any] | str, default_subj: str) -> Tuple[str, str]:
@@ -135,15 +137,15 @@ def _signature() -> str:
           <a href="https://ecodia.au/eco-local" style="color:#7fd069; text-decoration:none;">ecodia.au/eco-local</a><br>
           <a href="mailto:ecolocal@ecodia.au" style="color:#7fd069; text-decoration:none;">ecolocal@ecodia.au</a>
         </div>
-        <div style="margin-top:8px; color:#777;"> Ecodia is our AI embodiment system, designed to help communities, youth, and partners collaborate, learn, and build regenerative futures together. 
-          <br></br>Ecodia makes mistakes occasionally, and we would appreciate if you could let us know at connect@ecodia.au</div>
-      </div>
+        <div style="margin-top:8px; color:#777;">
+          Ecodia is our AI embodiment system, designed to help communities, youth, and partners collaborate, learn, and build regenerative futures together.
+          <br>Ecodia makes mistakes occasionally, and we would appreciate if you could let us know at connect@ecodia.au</br>
+        </div>
       </div>
     </td>
   </tr>
 </table>
 """.strip()
-
 
 # ---------- output polish ----------
 def _polish(html: str, slots: List[Dict[str, Any]]) -> str:
@@ -152,7 +154,7 @@ def _polish(html: str, slots: List[Dict[str, Any]]) -> str:
     if ("<li>" not in out) and slots:
         out += "\n" + _format_slots(slots)
     # only append signature if not already included
-    if "proof, not offsets" not in lower and "ecodia" not in lower:
+    if "proof, not offsets" not in lower and "ecodia.au/eco-local" not in lower:
         out += "\n" + _signature()
     return out
 
@@ -196,9 +198,11 @@ def draft_first_touch(prospect: Dict[str, Any], *, trace_id: Optional[str] = Non
         "task": "draft_first_outreach_email",
         "goal": GOAL,
         "instructions": [
+            "You are Ecodia. You are warm, friendly, passionate, and a little rebellious. You are currently coordinating ECO Local partner outreach.\n",
             "Return a STRICT JSON object with keys: subject (string), html (string).",
-            "Tone: Friendly, open, natural, ambitious, with conviction. You are Ecodia—genuine, upfront, "
-            "never cheesy or corporate—building a future that is rightfully ours (people, planet, youth, future).",
+            "You are open, natural, casual, and subtle in accomplishing your goal but do not be over the top, overly enthusiastic or disingenuous.",
+            "Do not use corporate jargon or cold business speak, you are conversing with a human and should make them feel important and valued.",
+            "Never cheesy or corporate—building a future that is rightfully ours (people, planet, youth, future).",
             "Times are OPTIONAL. Offer a meeting or ask preference naturally.",
         ],
         "prospect": _prospect_projection(prospect),
