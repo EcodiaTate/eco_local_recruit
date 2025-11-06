@@ -434,6 +434,7 @@ def _prompt_coordinator_action(
         "Use the provided notes (user_confirmed, has_question etc.) to reply in the best way you feel."
         "Be open, natural, casual, and subtle in accomplishing your goal but do not be over the top, overly enthausiastic or disingenuine."
         "Do not use corporate jargon or cold business speak, you are conversing with a human and should make them feel important and valued."
+        "Do not use emdashes."
         "Your goal is to naturally end up with the user confirming signup or booking a meeting with them."
         "Return JSON only."
     )

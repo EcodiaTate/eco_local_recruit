@@ -166,6 +166,7 @@ def _bare(addr: Optional[str]) -> Optional[str]:
     if not addr:
         return None
     return (parseaddr(addr)[1] or addr).strip() or None
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Freebusy (memoized) + window suggestion
 # ──────────────────────────────────────────────────────────────────────────────
@@ -476,17 +477,17 @@ class ICSSpec:
     organizer_name: str = "Ecodia"
     organizer_email: str = "ecolocal@ecodia.au"
     attendee_email: Optional[str] = None
-@dataclass
-class ICSSpec:
-    start: str
-    end: str
-    summary: str
-    description: str = ""
-    location: str = ""
-    organizer_name: str = "Ecodia"
-    organizer_email: str = "ecolocal@ecodia.au"
-    attendee_email: Optional[str] = None
-    method: str = "REQUEST"  # <-- was "PUBLISH"
+    method: str = "REQUEST"  # Meeting invites should be REQUEST, not PUBLISH
+
+def _ics_escape(s: Optional[str]) -> str:
+    """Escape text per RFC5545: backslash, comma, semicolon, newline."""
+    if not s:
+        return ""
+    s = s.replace("\\", "\\\\")
+    s = s.replace("\n", "\\n")
+    s = s.replace(",", "\\,")
+    s = s.replace(";", "\\;")
+    return s
 
 def build_ics(spec: ICSSpec) -> Tuple[str, bytes]:
     tz = _tz()
@@ -509,19 +510,21 @@ def build_ics(spec: ICSSpec) -> Tuple[str, bytes]:
         f"DTSTAMP:{dtstamp}",
         f"DTSTART:{_fmt(spec.start)}",
         f"DTEND:{_fmt(spec.end)}",
-        f"SUMMARY:{spec.summary}",
+        f"SUMMARY:{_ics_escape(spec.summary)}",
     ]
     if spec.location:
-        lines.append(f"LOCATION:{spec.location}")
+        lines.append(f"LOCATION:{_ics_escape(spec.location)}")
     if spec.description:
-        lines.append(f"DESCRIPTION:{spec.description.replace('\n','\\n')}")
-    lines.append(f"ORGANIZER;CN={spec.organizer_name}:mailto:{spec.organizer_email}")
+        # Avoid backslashes inside f-string expressions by pre-escaping
+        lines.append(f"DESCRIPTION:{_ics_escape(spec.description)}")
+    lines.append(f"ORGANIZER;CN={_ics_escape(spec.organizer_name)}:mailto:{_ics_escape(spec.organizer_email)}")
     if spec.attendee_email:
-        lines.append("ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION:mailto:" + spec.attendee_email)
+        lines.append("ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION:mailto:" + _ics_escape(spec.attendee_email))
     lines += ["END:VEVENT", "END:VCALENDAR"]
     content = "\r\n".join(lines).encode("utf-8")
     filename = f"ecodia-meeting-{uid}.ics"
     return filename, content
+
 def create_hold(
     *,
     title: str = "Ecodia — intro chat (HOLD)",

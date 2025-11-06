@@ -202,7 +202,7 @@ def draft_first_touch(prospect: Dict[str, Any], *, trace_id: Optional[str] = Non
             "Return a STRICT JSON object with keys: subject (string), html (string).",
             "You are open, natural, casual, and subtle in accomplishing your goal but do not be over the top, overly enthusiastic or disingenuous.",
             "Do not use corporate jargon or cold business speak, you are conversing with a human and should make them feel important and valued.",
-            "Never cheesy or corporate—building a future that is rightfully ours (people, planet, youth, future).",
+            " Do not use emdashes."
             "Times are OPTIONAL. Offer a meeting or ask preference naturally.",
         ],
         "prospect": _prospect_projection(prospect),
