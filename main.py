@@ -17,8 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from zoneinfo import ZoneInfo
 
 from recruiting.runsheet import (
-    build_runsheet_for_date,
-    send_runsheet_for_date,
+ 
     hourly_inbox_poll,
 )
 from recruiting.config import settings
@@ -156,18 +155,6 @@ async def discover(req: Request):
         return {"ok": True, "argv": argv}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/eco_local/recruit/runsheet/build")
-def build_runsheet(date_iso: str | None = None) -> Dict[str, Any]:
-    target = (_parse_date_iso(date_iso) if date_iso else (datetime.now(LOCAL_TZ) + timedelta(days=1)).date())
-    res = build_runsheet_for_date(target)
-    return {"date": str(target), "created": res.created, "counts": res.counts}
-
-@app.post("/eco_local/recruit/runsheet/send")
-def send_runsheet(date_iso: str | None = None) -> Dict[str, Any]:
-    target = _parse_date_iso(date_iso)
-    sent = send_runsheet_for_date(target)
-    return {"date": str(target), "sent": sent}
 
 @app.post("/eco_local/recruit/inbox/poll")
 def poll_inbox() -> Dict[str, int]:
