@@ -1,10 +1,27 @@
-ni .gitignore -Force
-Add-Content .gitignore @"
-secrets/
-.env
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
 *.pyd
-.turbo/daemon/*.log
-"@
+*.so
+*.dist-info/
+
+# Node/Next leftovers (if any)
+node_modules/
+.next/
+dist/
+build/
+
+# VCS
+.git
+.gitignore
+.gitlab-ci.yml
+.github/
+
+# Local dev
+.env
+secrets/
+*.log
+.turbo/
+.vscode/
+.DS_Store
