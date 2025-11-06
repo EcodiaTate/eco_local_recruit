@@ -1,0 +1,132 @@
+# app/main.py
+from __future__ import annotations
+
+from datetime import datetime, timedelta, date
+from typing import Optional, Dict, Any
+from dotenv import load_dotenv; load_dotenv()
+from fastapi.middleware.cors import CORSMiddleware
+
+from fastapi import FastAPI, Request
+from zoneinfo import ZoneInfo
+import sys, platform
+print("PYTHON:", sys.executable)
+print("VERSION:", sys.version)
+print("PLATFORM:", platform.platform())
+
+from recruiting.runsheet import build_runsheet_for_date, send_runsheet_for_date, hourly_inbox_poll
+from recruiting.config import settings
+from recruiting.debug_semantic import router as debug_semantic_router
+
+app = FastAPI(title="ECO Local Recruit Service", version="1.0.0", docs_url="/")
+# Allow your Next.js dev host(s). Add others as needed.
+ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3000",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,     # must be exact origins, not "*", if using credentials
+    allow_credentials=True,            # ok to keep True
+    allow_methods=["GET", "POST", "OPTIONS"],  # include OPTIONS for preflight
+    allow_headers=["*"],
+    expose_headers=["*"],              # optional
+    max_age=3600,                      # optional: cache preflight 1h
+)
+app.include_router(debug_semantic_router)
+
+from fastapi.staticfiles import StaticFiles
+app.mount("/static", StaticFiles(directory="./static"), name="static")
+
+from recruiting.timezones import resolve_tz
+LOCAL_TZ = resolve_tz(settings.LOCAL_TZ or "Australia/Brisbane")
+
+def _parse_date_iso(date_iso: Optional[str]) -> date:
+    if not date_iso:
+        return datetime.now(LOCAL_TZ).date()
+    try:
+        if len(date_iso) == 10:
+            return datetime.fromisoformat(date_iso).date()
+        return datetime.fromisoformat(date_iso).astimezone(LOCAL_TZ).date()
+    except Exception:
+        return datetime.now(LOCAL_TZ).date()
+
+
+@app.get("/healthz")
+def healthz() -> Dict[str, Any]:
+    return {"ok": True, "service": "eco_local-recruit", "env": settings.ENV}
+
+
+from fastapi import HTTPException
+from recruiting import orchestrator_cli as oc
+
+@app.post("/eco_local/recruit/outreach/build")
+def outreach_build(date_iso: str | None = None, freeze: bool = True, allow_fallback: bool = False):
+    argv = ["build"]
+    if date_iso: argv += ["--date", date_iso]
+    if freeze: argv += ["--freeze"]
+    if allow_fallback: argv += ["--allow-fallback"]
+    try:
+        oc.invoke(argv)
+        return {"ok": True, "argv": argv}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/eco_local/recruit/outreach/send")
+def outreach_send(date_iso: str | None = None):
+    argv = ["send"]
+    if date_iso: argv += ["--date", date_iso]
+    try:
+        oc.invoke(argv)
+        return {"ok": True, "argv": argv}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/eco_local/recruit/discover")
+async def discover(req: Request):
+    body = await req.json()
+    query = body.get("query")
+    city = body.get("city")
+    limit = str(body.get("limit", 10))
+    require_email = body.get("require_email", None)  # None = use default
+    if not query or not city:
+        raise HTTPException(status_code=400, detail="query and city are required")
+    argv = ["discover", "--query", query, "--city", city, "--limit", limit]
+    if require_email is True:
+        argv += ["--require-email"]
+    elif require_email is False:
+        argv += ["--no-require-email"]
+    try:
+        oc.invoke(argv)
+        return {"ok": True, "argv": argv}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/eco_local/recruit/runsheet/build")
+def build_runsheet(date_iso: str | None = None) -> Dict[str, Any]:
+    target = (_parse_date_iso(date_iso) if date_iso else (datetime.now(LOCAL_TZ) + timedelta(days=1)).date())
+    res = build_runsheet_for_date(target)
+    return {"date": str(target), "created": res.created, "counts": res.counts}
+
+
+@app.post("/eco_local/recruit/runsheet/send")
+def send_runsheet(date_iso: str | None = None) -> Dict[str, Any]:
+    target = _parse_date_iso(date_iso)
+    sent = send_runsheet_for_date(target)
+    return {"date": str(target), "sent": sent}
+
+
+@app.post("/eco_local/recruit/inbox/poll")
+def poll_inbox() -> Dict[str, int]:
+    processed = hourly_inbox_poll()
+    return {"processed": processed}
+
+
+@app.post("/eco_local/recruit/signup/webhook")
+async def signup_webhook(req: Request) -> Dict[str, bool]:
+    payload = await req.json()
+    # Keep it simple: mark “won” if payload indicates signup=true; extend as needed.
+    from recruiting.store import mark_signup_payload
+    mark_signup_payload(payload)
+    return {"ok": True}
