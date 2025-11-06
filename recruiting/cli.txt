@@ -1,0 +1,48 @@
+python -m seed_cli demo
+
+python -m recruiting.orchestrator_cli build --date 2025-11-04 --freeze
+
+python -m recruiting.orchestrator_cli send --date 2025-11-04
+
+python -m recruiting.orchestrator_cli poll-inbox
+
+
+PROJECT_ID=ecodiaos 
+REGION=australia-southeast1
+SERVICE=eco-recruit-worker
+
+URL=$(gcloud run services describe $SERVICE --region $REGION --format='value(status.url)')
+
+# 18:00 previous day — build & freeze drafts
+gcloud scheduler jobs create http outreach-build \
+  --schedule "0 18 * * *" \
+  --location $REGION \
+  --http-method POST \
+  --uri "$URL/eco_local/recruit/outreach/build?freeze=true" \
+  --oidc-service-account-email eco-recruit-sa@$PROJECT_ID.iam.gserviceaccount.com
+
+# 07:00 day-of — send drafts
+gcloud scheduler jobs create http outreach-send \
+  --schedule "0 7 * * *" \
+  --location $REGION \
+  --http-method POST \
+  --uri "$URL/eco_local/recruit/outreach/send" \
+  --oidc-service-account-email eco-recruit-sa@$PROJECT_ID.iam.gserviceaccount.com
+
+# Hourly — inbox poll/LLM flow
+gcloud scheduler jobs create http inbox-hourly \
+  --schedule "0 * * * *" \
+  --location $REGION \
+  --http-method POST \
+  --uri "$URL/eco_local/recruit/inbox/poll" \
+  --oidc-service-account-email eco-recruit-sa@$PROJECT_ID.iam.gserviceaccount.com
+
+# Optional daily discover (body controls it)
+gcloud scheduler jobs create http discover-daily \
+  --schedule "15 6 * * *" \
+  --location $REGION \
+  --http-method POST \
+  --uri "$URL/eco_local/recruit/discover" \
+  --headers "Content-Type=application/json" \
+  --message-body '{"query":"cafe","city":"Brisbane","limit":25,"require_email":true}' \
+  --oidc-service-account-email eco-recruit-sa@$PROJECT_ID.iam.gserviceaccount.com

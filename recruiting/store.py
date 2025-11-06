@@ -1,0 +1,507 @@
+# recruiting/store.py
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date
+from typing import Dict, Any, Iterable, List, Optional
+
+from neo4j import GraphDatabase
+from .config import settings
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Driver
+# ──────────────────────────────────────────────────────────────────────────────
+
+_driver = GraphDatabase.driver(
+    settings.NEO4J_URI,
+    auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD),
+)
+
+
+def _run(cy: str, params: Dict[str, Any] | None = None) -> List[Dict[str, Any]]:
+    """
+    Thin helper around a single-session run.
+    NOTE: If you hit transient locks, consider adding a simple retry loop here.
+    """
+    with _driver.session() as s:
+        rs = s.run(cy, **(params or {}))
+        return [r.data() for r in rs]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Settings / gates
+# ──────────────────────────────────────────────────────────────────────────────
+
+def get_first_touch_quota() -> int:
+    return settings.ECO_LOCAL_FIRST_TOUCH_QUOTA
+
+
+def get_followup_days() -> list[int]:
+    """
+    Ordered list of follow-up offsets in days, e.g. [3,7,14]
+    """
+    return [int(x) for x in settings.ECO_LOCAL_FOLLOWUP_DAYS.split(",") if x.strip()]
+
+
+def get_max_attempts() -> int:
+    return int(settings.ECO_LOCAL_MAX_ATTEMPTS)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Prospect selection
+# ──────────────────────────────────────────────────────────────────────────────
+
+def select_prospects_for_first_touch(limit: int) -> list[Dict[str, Any]]:
+    cy = """
+    MATCH (p:Prospect)
+    WHERE coalesce(p.qualified, false) = true
+      AND coalesce(p.outreach_started, false) = false
+      AND p.email IS NOT NULL
+    RETURN p
+    ORDER BY p.qualification_score DESC
+    LIMIT $limit
+    """
+    return [r["p"] for r in _run(cy, {"limit": int(limit)})]
+
+
+def select_prospects_for_followups(target: date, followup_days: list[int]) -> list[Dict[str, Any]]:
+    """
+    LEGACY SELECTOR (kept for backwards compatibility).
+
+    Select prospects where the next follow-up is due on `target`.
+    If p.next_followup_at exists, we use that.
+    Otherwise, we emulate the schedule using last_outreach_at + days[attempt_count].
+
+    NOTE: Prefer list_followups_due() for robust datetime-based selection.
+    """
+    cy = """
+    WITH date($t) AS tgt, $days AS days
+    MATCH (p:Prospect)
+    WHERE coalesce(p.outreach_started, false) = true
+      AND coalesce(p.won, false) = false
+      AND coalesce(p.unsubscribed, false) = false
+      AND p.email IS NOT NULL
+      AND coalesce(p.attempt_count, 0) < $max_attempts
+    WITH p, tgt, days, coalesce(p.attempt_count,0) AS a
+    // If explicit next_followup_at is set, prefer it (date equality to the target)
+    WITH p, tgt, days, a,
+         (p.next_followup_at IS NOT NULL) AS has_next,
+         (CASE WHEN p.next_followup_at IS NOT NULL
+               THEN date(datetime(p.next_followup_at))
+               ELSE date(datetime(p.last_outreach_at)) + duration({days: toInteger(
+                        CASE WHEN a < size(days) THEN days[a] ELSE days[size(days)-1] END
+                    )})
+          END) AS due_date
+    WHERE due_date = tgt
+    RETURN p
+    """
+    params = {
+        "t": target.isoformat(),
+        "days": [int(d) for d in followup_days],
+        "max_attempts": get_max_attempts(),
+    }
+    return [r["p"] for r in _run(cy, params)]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Modern follow-up helpers (datetime-robust)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def list_followups_due(max_attempts: int, followup_days_csv: str) -> List[Dict[str, Any]]:
+    """
+    Returns prospects with next_followup_at due now (datetime-accurate).
+    If next_followup_at is null, this function ignores them (schedule it when sending).
+    """
+    cy = """
+    WITH datetime() AS now, toInteger($maxA) AS maxA
+    MATCH (p:Prospect)
+    WHERE coalesce(p.unsubscribed,false) = false
+      AND coalesce(p.won,false) = false
+      AND coalesce(p.attempt_count,0) < maxA
+      AND p.email IS NOT NULL
+      AND p.next_followup_at IS NOT NULL
+      AND datetime(p.next_followup_at) <= now
+    RETURN p {.*, email: p.email} AS p
+    ORDER BY p.next_followup_at ASC
+    LIMIT 500
+    """
+    return _run(cy, {"maxA": int(max_attempts)})
+
+
+def mark_followup_sent(email: str, followup_days_csv: str) -> Dict[str, Any]:
+    """
+    Increments attempt_count, stamps last_outreach_at, and computes the next_followup_at
+    using the follow-up schedule defined in followup_days_csv (e.g. "3,7,14").
+
+    If attempts reach the end of the schedule, next_followup_at is set to NULL.
+    """
+    cy = """
+    WITH datetime() AS now, split($days_csv, ",") AS days
+    MATCH (p:Prospect {email:$email})
+    WITH p, now, coalesce(p.attempt_count,0) AS a, days
+    WITH p, now, a,
+         toInteger(days[CASE WHEN a < size(days) THEN a ELSE size(days)-1 END]) AS addDays
+    SET p.attempt_count   = a + 1,
+        p.last_outreach_at = now,
+        p.updated_at       = now,
+        p.outreach_started = true,
+        p.next_followup_at = CASE
+                               WHEN a + 1 >= size(days) THEN NULL
+                               ELSE now + duration({days:addDays})
+                             END
+    RETURN p { .email, .attempt_count, .next_followup_at } AS p
+    """
+    rs = _run(cy, {"email": email, "days_csv": followup_days_csv})
+    return rs[0]["p"] if rs else {}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Runsheet bookkeeping
+# ──────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class RunItem:
+    email: str
+    subject: str
+    body: str
+    type: str  # e.g. "first" | "followup1" | "followup2" | "final"
+
+
+def create_run(target: date) -> Dict[str, Any]:
+    cy = """
+    MERGE (r:ECO:LocalRun {date: date($d)})
+    ON CREATE SET r.created_at = datetime()
+    RETURN r
+    """
+    return _run(cy, {"d": target.isoformat()})[0]["r"]
+
+
+def attach_draft_email(run, prospect: Dict[str, Any], kind: str, subject: str, body: str) -> None:
+    """
+    Idempotently attach/update a draft for (run_date, kind, email, subject).
+    """
+    cy = """
+    MATCH (p:Prospect {id: $pid})
+    MERGE (m:Draft { run_date: date($d), kind: $kind, email: p.email, subject: $subject })
+    SET m.body = $body,
+        m.created_at = coalesce(m.created_at, datetime()),
+        m.updated_at = datetime()
+    """
+    _run(
+        cy,
+        {
+            "d": run["date"],
+            "pid": prospect["id"],
+            "kind": kind,
+            "subject": subject,
+            "body": body,
+        },
+    )
+
+
+def freeze_run(run) -> None:
+    cy = "MERGE (r:ECO:LocalRun {date: date($d)}) SET r.frozen = true, r.frozen_at = datetime()"
+    _run(cy, {"d": run["date"]})
+
+
+def iter_run_items(target: date) -> Iterable[RunItem]:
+    """
+    Fetch drafts by the run_date (canonical path).
+    """
+    cy = """
+    MATCH (m:Draft {run_date: date($d)})
+    RETURN m.kind AS kind, m.email AS email, m.subject AS subject, m.body AS body
+    """
+    rows = _run(cy, {"d": target.isoformat()})
+    for r in rows:
+        yield RunItem(email=r["email"], subject=r["subject"], body=r["body"], type=r["kind"])
+
+
+def mark_sent(item: RunItem, message_id: str) -> None:
+    """
+    - Mark draft as sent
+    - Upsert a Thread keyed by (email)
+    - Update Prospect: outreach_started, attempt_count += 1, last_outreach_at = now
+      (NOTE: Follow-up scheduling should call mark_followup_sent() afterwards.)
+    """
+    cy = """
+    // 1) Mark draft
+    MATCH (m:Draft {email: $email, subject: $subject})
+    SET m.sent = true,
+        m.sent_at = datetime(),
+        m.message_id = $mid
+
+    // 2) Thread linkage
+    WITH m
+    MERGE (t:Thread {email: m.email})
+      ON CREATE SET t.created_at = datetime()
+    SET t.last_outbound_date = date(datetime()),
+        t.last_outbound_at   = datetime()
+    MERGE (m)-[:IN_THREAD]->(t)
+
+    // 3) Update Prospect (basic stamps)
+    WITH m, t
+    MATCH (p:Prospect {email: m.email})
+    SET p.outreach_started = true,
+        p.attempt_count    = coalesce(p.attempt_count, 0) + 1,
+        p.last_outreach_at = datetime(),
+        p.updated_at       = datetime()
+    """
+    _run(cy, {"email": item.email, "subject": item.subject, "mid": message_id})
+    # Intentionally do NOT compute next_followup_at here; caller should invoke mark_followup_sent()
+    # with the configured schedule so both first and follow-up emails share one path.
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Inbound/update helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def mark_signup_payload(payload: Dict[str, Any]) -> None:
+    email = (payload or {}).get("email")
+    if not email:
+        return
+    cy = """
+    MATCH (p:Prospect {email: $email})
+    SET p.won = true, p.won_at = datetime(), p.updated_at = datetime()
+    """
+    _run(cy, {"email": email})
+
+
+def mark_unsubscribe(prospect: Dict[str, Any]) -> None:
+    cy = """
+    MATCH (p:Prospect {id: $pid})
+    SET p.unsubscribed = true, p.unsubscribed_at = datetime(), p.updated_at = datetime()
+    """
+    _run(cy, {"pid": prospect["id"]})
+
+
+def mark_reply_won(prospect: Dict[str, Any]) -> None:
+    cy = "MATCH (p:Prospect {id: $pid}) SET p.won = true, p.won_at = datetime(), p.updated_at = datetime()"
+    _run(cy, {"pid": prospect["id"]})
+
+
+def log_reply_draft(prospect: Dict[str, Any], message_id: str, html: str) -> None:
+    """
+    Record that we sent a reply (draft or final) to a prospect, link it to a Thread.
+    """
+    cy = """
+    MATCH (p:Prospect {id:$pid})
+    MERGE (t:Thread {email: p.email})
+      ON CREATE SET t.created_at = datetime()
+    SET t.last_outbound_at = datetime()
+    MERGE (m:Reply {message_id:$mid})
+      ON CREATE SET m.created_at = datetime()
+    SET m.html = $html, m.updated_at = datetime(),
+        m.subject = coalesce(m.subject, '')
+    MERGE (p)-[:IN_THREAD]->(t)
+    MERGE (m)-[:IN_THREAD]->(t)
+    """
+    _run(cy, {"pid": prospect["id"], "mid": message_id, "html": html})
+
+
+def book_event(prospect: Dict[str, Any], slot: Dict[str, Any]) -> None:
+    """
+    Persist a calendar record (currently modeled as a HOLD).
+    slot: {"start": "...", "end": "...", "tz": "..."}
+    """
+    cy = """
+    MATCH (p:Prospect {id:$pid})
+    MERGE (h:CalendarHold {
+      start:$start, end:$end, tz:coalesce($tz,'')
+    })
+    ON CREATE SET h.created_at = datetime(), h.status = 'hold'
+    SET h.updated_at = datetime()
+    MERGE (p)-[:HAS_HOLD]->(h)
+    """
+    _run(
+        cy,
+        {
+            "pid": prospect["id"],
+            "start": slot.get("start"),
+            "end": slot.get("end"),
+            "tz": slot.get("tz"),
+        },
+    )
+
+
+def upsert_prospect_by_email(email: str, name: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Create (or update) a minimal Prospect on first inbound from an unknown sender.
+    Defaults: qualified=true, moderate score.
+    """
+    cy = """
+    MERGE (p:Prospect {email:$email})
+    ON CREATE SET p.id = randomUUID(),
+                  p.created_at = datetime(),
+                  p.qualified = true,
+                  p.qualification_score = 0.6,
+                  p.qualification_reason = 'inbound'
+    SET p.name = coalesce($name, p.name),
+        p.updated_at = datetime()
+    RETURN p
+    """
+    return _run(cy, {"email": email, "name": name})[0]["p"]
+
+
+def log_inbound_email(prospect: Dict[str, Any], message: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Persist an inbound email node and link it to the Prospect's Thread.
+    Creates/updates a Thread (by email) and sets Thread.id if a Gmail thread_id is supplied.
+    Returns the created/merged inbound email projection.
+    """
+    gid = (message.get("id") or message.get("gmail_id") or "").strip()
+    tid = (message.get("thread_id") or message.get("threadId") or "").strip()
+    subj = (message.get("subject") or "").strip()
+    snippet = (message.get("snippet") or "").strip()
+    body = (message.get("body_text") or "").strip()
+    frm = (message.get("from") or "").strip()
+
+    cy = """
+    MATCH (p:Prospect {id:$pid})
+
+    // Thread by email; set thread id if provided
+    MERGE (t:Thread {email: p.email})
+      ON CREATE SET t.created_at = datetime()
+    SET t.last_inbound_at = datetime()
+    FOREACH (_ IN CASE WHEN $tid <> '' THEN [1] ELSE [] END |
+      SET t.id = coalesce(t.id, $tid)
+    )
+
+    // Create inbound email node keyed by Gmail id if available, else by (email+subject+timestamp)
+    MERGE (m:InboundEmail {
+      key: CASE
+              WHEN $gid <> '' THEN $gid
+              ELSE p.email + '|' + coalesce($subj,'') + '|' + toString(datetime())
+           END
+    })
+      ON CREATE SET m.created_at = datetime()
+    SET m.gmail_id     = CASE WHEN $gid <> '' THEN $gid ELSE m.gmail_id END,
+        m.thread_id    = CASE WHEN $tid <> '' THEN $tid ELSE m.thread_id END,
+        m.from_raw     = $from,
+        m.subject      = $subj,
+        m.snippet      = $snippet,
+        m.body_text    = $body,
+        m.received_at  = coalesce(m.received_at, datetime()),
+        m.updated_at   = datetime()
+
+    MERGE (p)-[:IN_THREAD]->(t)
+    MERGE (m)-[:IN_THREAD]->(t)
+
+    RETURN m { .key, .gmail_id, .thread_id, .subject, .received_at } AS inbound
+    """
+    rows = _run(
+        cy,
+        {
+            "pid": prospect["id"],
+            "gid": gid,
+            "tid": tid,
+            "from": frm,
+            "subj": subj,
+            "snippet": snippet,
+            "body": body,
+        },
+    )
+    return rows[0]["inbound"] if rows else {}
+
+
+def close_driver() -> None:
+    try:
+        _driver.close()
+    except Exception:
+        pass
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Seen registry (dedupe across discovery runs)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _norm_email(e: Optional[str]) -> Optional[str]:
+    if not e:
+        return None
+    e = e.strip().lower()
+    return e or None
+
+
+def _norm_domain(d: Optional[str]) -> Optional[str]:
+    if not d:
+        return None
+    d = d.strip().lower()
+    return d[4:] if d.startswith("www.") else d
+
+
+def ensure_dedupe_constraints() -> None:
+    """
+    Idempotent uniqueness constraints:
+      - Seen registries
+      - Prospect email/domain
+    Safe to call often.
+    """
+    stmts = [
+        "CREATE CONSTRAINT seen_domain  IF NOT EXISTS FOR (n:SeenTarget) REQUIRE n.domain IS UNIQUE",
+        "CREATE CONSTRAINT seen_email   IF NOT EXISTS FOR (n:SeenEmail)  REQUIRE n.email  IS UNIQUE",
+        "CREATE CONSTRAINT prospect_em  IF NOT EXISTS FOR (p:Prospect)   REQUIRE p.email  IS UNIQUE",
+        "CREATE CONSTRAINT prospect_dom IF NOT EXISTS FOR (p:Prospect)   REQUIRE p.domain IS UNIQUE",
+    ]
+    for cy in stmts:
+        try:
+            _run(cy)
+        except Exception:
+            # ignore if edition/permissions don't allow constraint ops
+            pass
+
+
+# Backwards-compat shim: keep the old function name working
+def ensure_seen_constraints() -> None:
+    ensure_dedupe_constraints()
+
+
+def has_prospect(*, email: Optional[str] = None, domain: Optional[str] = None) -> bool:
+    email = _norm_email(email)
+    domain = _norm_domain(domain)
+    if email:
+        rows = _run("MATCH (p:Prospect {email:$e}) RETURN 1 AS one LIMIT 1", {"e": email})
+        if rows:
+            return True
+    if domain:
+        rows = _run("MATCH (p:Prospect {domain:$d}) RETURN 1 AS one LIMIT 1", {"d": domain})
+        if rows:
+            return True
+    return False
+
+
+def has_seen_candidate(*, domain: Optional[str], email: Optional[str]) -> bool:
+    domain = _norm_domain(domain)
+    email = _norm_email(email)
+    if email:
+        rows = _run("MATCH (e:SeenEmail {email:$e}) RETURN 1 AS one LIMIT 1", {"e": email})
+        if rows:
+            return True
+    if domain:
+        rows = _run("MATCH (d:SeenTarget {domain:$d}) RETURN 1 AS one LIMIT 1", {"d": domain})
+        if rows:
+            return True
+    return False
+
+
+def mark_seen_candidate(*, domain: Optional[str], email: Optional[str], name: Optional[str] = None) -> None:
+    ensure_dedupe_constraints()
+    domain = _norm_domain(domain)
+    email = _norm_email(email)
+    if domain:
+        _run(
+            """
+            MERGE (d:SeenTarget {domain:$d})
+            ON CREATE SET d.first_seen = datetime()
+            SET d.name = coalesce($name, d.name)
+            """,
+            {"d": domain, "name": name},
+        )
+    if email:
+        _run(
+            """
+            MERGE (e:SeenEmail {email:$e})
+            ON CREATE SET e.first_seen = datetime()
+            SET e.name = coalesce($name, e.name)
+            """,
+            {"e": email, "name": name},
+        )
