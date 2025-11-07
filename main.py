@@ -4,17 +4,18 @@ from __future__ import annotations
 import os
 import sys
 import json
+import time
 import platform
 import logging
 from datetime import datetime, timedelta, date
-from typing import Optional, Dict, Any, List
-# app/main.py (add near the other imports)
-import time
-from typing import Tuple
+from typing import Optional, Dict, Any, List, Tuple
+from pathlib import Path
+from random import Random
+
 try:
-    import httpx  # FastAPI stacks usually have it; if not, `pip install httpx`
+    import httpx  # lightweight fetch for hosted config
 except Exception:
-    httpx = None  # we'll fail soft and fall back to defaults
+    httpx = None  # fall back to defaults if missing
 
 from dotenv import load_dotenv; load_dotenv()
 
@@ -22,12 +23,7 @@ from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from zoneinfo import ZoneInfo
-from pathlib import Path
-
-from recruiting.runsheet import (
-    hourly_inbox_poll,
-)
+from recruiting.runsheet import hourly_inbox_poll
 from recruiting.config import settings
 from recruiting.debug_semantic import router as debug_semantic_router
 from recruiting.referrals_router import router as referrals_router
@@ -52,7 +48,6 @@ if not logging.getLogger().handlers:
 # ──────────────────────────────────────────────────────────────────────────────
 app = FastAPI(title="ECO Local Recruit Service", version="1.0.0", docs_url="/")
 
-# Allow your Next.js dev host(s). Add others as needed or control via env.
 ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://localhost:3001",
@@ -60,12 +55,11 @@ ALLOWED_ORIGINS = [
 ]
 env_origins = os.getenv("ECO_LOCAL_CORS_ORIGINS")
 if env_origins:
-    # Comma-separated, e.g. "https://elocal.ecodia.au,https://admin.ecodia.au"
     ALLOWED_ORIGINS.extend([o.strip() for o in env_origins.split(",") if o.strip()])
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,     # must be exact origins, not "*", if using credentials
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
@@ -81,21 +75,18 @@ app.include_router(dev_router)
 # Static (robust for local + prod)
 # ──────────────────────────────────────────────────────────────────────────────
 APP_FILE = Path(__file__).resolve()
-APP_DIR = APP_FILE.parent                    # .../eco_local/app
-PKG_ROOT = APP_DIR.parent                    # .../eco_local
-REPO_ROOT = PKG_ROOT.parent                  # .../EcodiaOS
+APP_DIR = APP_FILE.parent
+PKG_ROOT = APP_DIR.parent
+REPO_ROOT = PKG_ROOT.parent
 
 ENV_STATIC = os.getenv("ECO_LOCAL_STATIC_DIR")
-
 CANDIDATES = [
-    ENV_STATIC,                              # explicit override wins
-    str(PKG_ROOT / "static"),                # prefer eco_local/static  ✅
-    str(APP_DIR / "static"),                 # optional: app/static
-    str(REPO_ROOT / "static"),               # fallback: EcodiaOS/static
+    ENV_STATIC,
+    str(PKG_ROOT / "static"),
+    str(APP_DIR / "static"),
+    str(REPO_ROOT / "static"),
 ]
-
 STATIC_DIR = next((p for p in CANDIDATES if p and os.path.isdir(p)), None)
-
 if not STATIC_DIR:
     STATIC_DIR = str(PKG_ROOT / "static")
     os.makedirs(STATIC_DIR, exist_ok=True)
@@ -109,15 +100,11 @@ log.info("Mounted static directory at /static from %s", STATIC_DIR)
 # ──────────────────────────────────────────────────────────────────────────────
 LOCAL_TZ = resolve_tz(settings.LOCAL_TZ or "Australia/Brisbane")
 
-def _parse_date_iso(date_iso: Optional[str]) -> date:
-    if not date_iso:
-        return datetime.now(LOCAL_TZ).date()
-    try:
-        if len(date_iso) == 10:
-            return datetime.fromisoformat(date_iso).date()
-        return datetime.fromisoformat(date_iso).astimezone(LOCAL_TZ).date()
-    except Exception:
-        return datetime.now(LOCAL_TZ).date()
+def _days_since_epoch_au(dt: Optional[date] = None) -> int:
+    tz = LOCAL_TZ
+    now = datetime.now(tz) if dt is None else datetime(dt.year, dt.month, dt.day, tzinfo=tz)
+    epoch = datetime(1970, 1, 1, tzinfo=tz)
+    return (now - epoch).days
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Health
@@ -127,7 +114,7 @@ def healthz() -> Dict[str, Any]:
     return {"ok": True, "service": "eco_local-recruit", "env": settings.ENV}
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Orchestrator endpoints (existing)
+# Orchestrator passthroughs (unchanged)
 # ──────────────────────────────────────────────────────────────────────────────
 @app.post("/eco_local/recruit/outreach/build")
 def outreach_build(
@@ -136,12 +123,9 @@ def outreach_build(
     allow_fallback: bool = False,
 ):
     argv = ["build"]
-    if date_iso:
-        argv += ["--date", date_iso]
-    if freeze:
-        argv += ["--freeze"]
-    if allow_fallback:
-        argv += ["--allow-fallback"]
+    if date_iso: argv += ["--date", date_iso]
+    if freeze:   argv += ["--freeze"]
+    if allow_fallback: argv += ["--allow-fallback"]
     try:
         oc.invoke(argv)
         return {"ok": True, "argv": argv}
@@ -151,8 +135,7 @@ def outreach_build(
 @app.post("/eco_local/recruit/outreach/send")
 def outreach_send(date_iso: str | None = None):
     argv = ["send"]
-    if date_iso:
-        argv += ["--date", date_iso]
+    if date_iso: argv += ["--date", date_iso]
     try:
         oc.invoke(argv)
         return {"ok": True, "argv": argv}
@@ -192,25 +175,16 @@ async def signup_webhook(req: Request) -> Dict[str, bool]:
     return {"ok": True}
 
 # ──────────────────────────────────────────────────────────────────────────────
-# NEW: Rotating discovery endpoint
+# Rotation & Plan loaders (URL/file/env → fallback defaults)
 # ──────────────────────────────────────────────────────────────────────────────
-"""
-Rotation plan source (first found wins):
+# Flat rotation cache
+_ROTATION_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None, "etag": None}
+_ROTATION_TTL_SECONDS = int(os.getenv("ECO_LOCAL_DISCOVER_ROTATION_TTL", "600"))
 
-1) ENV var ECO_LOCAL_DISCOVER_ROTATION as JSON list:
-   [
-     {"query": "sunshine coast cafes", "city": "Sunshine Coast", "limit": 60},
-     {"query": "brisbane thrift stores", "city": "Brisbane", "limit": 60},
-     {"query": "organic farms", "city": "Sunshine Coast", "limit": 60}
-   ]
+# Plan (generator) cache
+_PLAN_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None, "etag": None}
+_PLAN_TTL_SECONDS = int(os.getenv("ECO_LOCAL_DISCOVER_PLAN_TTL", "600"))
 
-2) Default rotation baked in below.
-
-Selection:
-- default index = days since 1970-01-01 in Australia/Brisbane modulo len(plan)
-- override with ?index=2 or ?day_seed=2025-11-07 or ?offset=+1
-"""
-# app/main.py (keep your DEFAULT_ROTATION as-is; we’ll still use it)
 DEFAULT_ROTATION: List[Dict[str, Any]] = [
     {"query": "sunshine coast cafes",   "city": "Sunshine Coast", "limit": 60},
     {"query": "brisbane thrift stores", "city": "Brisbane",        "limit": 60},
@@ -218,160 +192,277 @@ DEFAULT_ROTATION: List[Dict[str, Any]] = [
     {"query": "zero waste shops",       "city": "Brisbane",        "limit": 60},
     {"query": "farmers markets",        "city": "Sunshine Coast",  "limit": 60},
 ]
-# app/main.py (NEW: small cache + loader that tries file -> env -> URL -> default)
-_ROTATION_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None, "etag": None}
-_ROTATION_TTL_SECONDS = int(os.getenv("ECO_LOCAL_DISCOVER_ROTATION_TTL", "600"))  # 10 min default
 
-def _load_rotation_plan(*, force_refresh: bool = False) -> List[Dict[str, Any]]:
-    """
-    Priority:
-      1) File (ECO_LOCAL_DISCOVER_ROTATION_FILE), if present and valid JSON
-      2) Env var ECO_LOCAL_DISCOVER_ROTATION (JSON)
-      3) Remote URL ECO_LOCAL_DISCOVER_ROTATION_URL (JSON)  ← your prod: https://elocal.ecodia.au/config/discover_rotation.json
-      4) DEFAULT_ROTATION (in code)
-    Caches URL result for _ROTATION_TTL_SECONDS unless force_refresh=True.
-    """
-    # 1) File override
-    path = os.getenv("ECO_LOCAL_DISCOVER_ROTATION_FILE", "/config/discover_rotation.json")
+def _load_json_file(path: str) -> Optional[Any]:
     try:
         if os.path.isfile(path):
             with open(path, "r", encoding="utf-8") as f:
-                plan = json.load(f)
-                if isinstance(plan, list) and plan:
-                    return plan
+                return json.load(f)
     except Exception:
-        log.warning("Rotation file invalid; ignoring: %s", path)
+        pass
+    return None
 
-    # 2) Env var override
+def _fetch_json_url(url: str, cache: Dict[str, Any], ttl: int) -> Optional[Any]:
+    if not httpx:
+        return None
+    now = time.time()
+    if cache["data"] and (now - cache["ts"] < ttl):
+        return cache["data"]
+    headers = {}
+    if cache.get("etag"):
+        headers["If-None-Match"] = cache["etag"]
+    try:
+        resp = httpx.get(url, headers=headers, timeout=6.0)
+        if resp.status_code == 304 and cache["data"]:
+            cache["ts"] = now
+            return cache["data"]
+        resp.raise_for_status()
+        data = resp.json()
+        cache["data"] = data
+        cache["ts"] = now
+        cache["etag"] = resp.headers.get("ETag")
+        return data
+    except Exception:
+        return None
+
+def _load_rotation_plan(*, force_refresh: bool = False) -> List[Dict[str, Any]]:
+    # 1) file
+    if not force_refresh:
+        data = _load_json_file(os.getenv("ECO_LOCAL_DISCOVER_ROTATION_FILE", "/config/discover_rotation.json"))
+        if isinstance(data, list) and data:
+            return data
+    # 2) env
     raw = os.getenv("ECO_LOCAL_DISCOVER_ROTATION")
     if raw:
         try:
-            plan = json.loads(raw)
-            if isinstance(plan, list) and plan:
-                return plan
+            data = json.loads(raw)
+            if isinstance(data, list) and data:
+                return data
         except Exception:
-            log.warning("ECO_LOCAL_DISCOVER_ROTATION invalid JSON; using fallbacks.")
-
-    # 3) Remote URL
-    url = os.getenv(
-        "ECO_LOCAL_DISCOVER_ROTATION_URL",
-        "https://elocal.ecodia.au/config/discover_rotation.json"
-    )
-    now = time.time()
-    if not force_refresh and _ROTATION_CACHE["data"] and (now - _ROTATION_CACHE["ts"] < _ROTATION_TTL_SECONDS):
-        return _ROTATION_CACHE["data"]
-
-    if httpx and url:
-        headers = {}
-        if _ROTATION_CACHE.get("etag"):
-            headers["If-None-Match"] = _ROTATION_CACHE["etag"]
-        try:
-            resp = httpx.get(url, headers=headers, timeout=5.0)
-            if resp.status_code == 304 and _ROTATION_CACHE["data"]:
-                _ROTATION_CACHE["ts"] = now
-                return _ROTATION_CACHE["data"]
-            resp.raise_for_status()
-            plan = resp.json()
-            if isinstance(plan, list) and plan:
-                _ROTATION_CACHE["data"] = plan
-                _ROTATION_CACHE["ts"] = now
-                _ROTATION_CACHE["etag"] = resp.headers.get("ETag")
-                return plan
-            else:
-                log.warning("Rotation URL returned non-list or empty JSON; falling back. url=%s", url)
-        except Exception as e:
-            log.warning("Failed to fetch rotation from URL (%s): %s", url, e)
-
-    # 4) In-code default
+            pass
+    # 3) URL
+    url = os.getenv("ECO_LOCAL_DISCOVER_ROTATION_URL", "https://elocal.ecodia.au/config/discover_rotation.json")
+    data = _fetch_json_url(url, _ROTATION_CACHE, _ROTATION_TTL_SECONDS)
+    if isinstance(data, list) and data:
+        return data
+    # 4) default
     return DEFAULT_ROTATION
 
+def _load_generator_plan(*, force_refresh: bool = False) -> Optional[Dict[str, Any]]:
+    # 1) file
+    if not force_refresh:
+        data = _load_json_file(os.getenv("ECO_LOCAL_DISCOVER_PLAN_FILE", "/config/discover_plan.json"))
+        if isinstance(data, dict) and data:
+            return data
+    # 2) env
+    raw = os.getenv("ECO_LOCAL_DISCOVER_PLAN_JSON")
+    if raw:
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict) and data:
+                return data
+        except Exception:
+            pass
+    # 3) URL
+    url = os.getenv("ECO_LOCAL_DISCOVER_PLAN_URL", "https://elocal.ecodia.au/config/discover_query_plan_v3.json")
+    data = _fetch_json_url(url, _PLAN_CACHE, _PLAN_TTL_SECONDS)
+    if isinstance(data, dict) and data:
+        return data
+    return None
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Generator utilities (plan → list[ {query, city, limit} ])
+# ──────────────────────────────────────────────────────────────────────────────
+def _weighted_pick(rng: Random, items: List[Tuple[str, float]]) -> str:
+    total = sum(w for _, w in items)
+    if total <= 0:
+        return items[0][0]
+    x = rng.random() * total
+    acc = 0.0
+    for v, w in items:
+        acc += w
+        if x <= acc:
+            return v
+    return items[-1][0]
 
-def _days_since_epoch_au(dt: Optional[date] = None) -> int:
-    tz = LOCAL_TZ
-    now = datetime.now(tz) if dt is None else datetime(dt.year, dt.month, dt.day, tzinfo=tz)
-    epoch = datetime(1970, 1, 1, tzinfo=tz)
-    return (now - epoch).days
+def _norm_mix(mix: List[Dict[str, Any]]) -> List[Tuple[str, float, List[str]]]:
+    out: List[Tuple[str, float, List[str]]] = []
+    for m in mix or []:
+        name = str(m.get("name") or "")
+        w = float(m.get("weight") or 0.0)
+        tpls = [str(t) for t in (m.get("templates") or []) if t]
+        if name and w > 0 and tpls:
+            out.append((name, w, tpls))
+    return out
 
-def _pick_rotation(plan: List[Dict[str, Any]], *, index: Optional[int], day_seed: Optional[str], offset: int) -> Dict[str, Any]:
-    if not plan:
-        raise HTTPException(status_code=500, detail="Rotation plan is empty")
-    if index is not None:
-        idx = index % len(plan)
+def _synth_queries_from_plan(plan: Dict[str, Any], day_seed: Optional[str], batch_n: int) -> List[Dict[str, Any]]:
+    """
+    Compose N (query, city, limit) items deterministically from the plan.
+    """
+    # seed
+    if day_seed:
+        try:
+            sd = date.fromisoformat(day_seed)
+            seed_val = int(sd.strftime("%Y%m%d"))
+        except Exception:
+            seed_val = _days_since_epoch_au()
     else:
-        seed_date: Optional[date] = None
-        if day_seed:
-            try:
-                seed_date = datetime.fromisoformat(day_seed).date()
-            except Exception:
-                try:
-                    seed_date = date.fromisoformat(day_seed)
-                except Exception:
-                    raise HTTPException(status_code=400, detail="Invalid day_seed format (use YYYY-MM-DD)")
-        base = _days_since_epoch_au(seed_date)
-        idx = base % len(plan)
-        if offset:
-            idx = (idx + offset) % len(plan)
-    return plan[idx]
-# app/main.py (tweak your rotate endpoint to allow refresh=?)
+        seed_val = _days_since_epoch_au()
+    rng = Random(seed_val)
+
+    # buckets
+    buckets = plan.get("buckets") or {}
+    nouns_core = list(buckets.get("nouns_core") or []) + list(buckets.get("nouns_explore") or [])
+    modifiers = list(buckets.get("modifiers") or [])
+
+    geo = plan.get("geo") or {}
+    region = str(geo.get("region") or "Sunshine Coast")
+    suburbs_top = list(geo.get("suburbs_top") or [])
+    suburbs_all = list(geo.get("suburbs_all") or [])
+
+    # mix weights
+    mix_spec = _norm_mix(plan.get("mix") or [
+        {"name": "region_mod_noun", "weight": 0.50, "templates": ["{modifier} {noun}"]},
+        {"name": "suburb_noun",     "weight": 0.35, "templates": ["{noun}"]},
+        {"name": "suburb_mod_noun", "weight": 0.15, "templates": ["{modifier} {noun}"]},
+    ])
+    mix_items = [(name, w) for (name, w, _tpls) in mix_spec]
+
+    def pick_from(lst: List[str]) -> str:
+        return lst[rng.randrange(len(lst))]
+
+    items: List[Dict[str, Any]] = []
+    seen_keys: set[Tuple[str, str]] = set()
+
+    # how many suburb vs region
+    # we'll bias toward top suburbs but sprinkle others
+    for _ in range(max(1, batch_n)):
+        beam = _weighted_pick(rng, mix_items)
+        tpl_list = [tpls for (nm, _w, tpls) in mix_spec if nm == beam][0]
+        tpl = pick_from(tpl_list)
+        noun = pick_from(nouns_core)
+        mod  = pick_from(modifiers) if "{modifier}" in tpl else None
+
+        if beam.startswith("region"):
+            city = region
+        elif beam.startswith("suburb"):
+            # 70% from top suburbs, 30% from wider list
+            if suburbs_top and (rng.random() < 0.70):
+                city = pick_from(suburbs_top)
+            else:
+                pool = (suburbs_all or suburbs_top or [region])
+                city = pick_from(pool)
+        else:
+            city = region
+
+        q = tpl.replace("{noun}", noun).replace("{modifier}", mod or "").strip()
+        key = (q.lower(), city.lower())
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+
+        items.append({"query": q, "city": city, "limit": int(plan.get("constraints", {}).get("limit_default", 60))})
+
+    return items
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Rotate endpoint (supports flat rotation OR generator plan), with batching
+# ──────────────────────────────────────────────────────────────────────────────
 @app.api_route("/eco_local/recruit/discover/rotate", methods=["GET", "POST"])
 async def discover_rotate(
     request: Request,
-    index: int | None = Query(default=None, description="Pick specific rotation index"),
-    day_seed: str | None = Query(default=None, description="ISO date to seed rotation, e.g. 2025-11-07"),
-    offset: int = Query(default=0, description="Offset from seeded index (can be negative)"),
+    day_seed: str | None = Query(default=None, description="ISO date seed, e.g. 2025-11-07"),
+    offset: int = Query(default=0, description="Offset window for flat rotation mode (can be negative)"),
     require_email: bool | None = Query(default=None, description="Override require-email gate"),
-    limit: int | None = Query(default=None, description="Override per-run limit"),
-    refresh: int = Query(default=0, description="Force refresh of remote rotation (1=yes)"),
+    limit: int | None = Query(default=None, description="Override per-run limit (applies to all items)"),
+    refresh: int = Query(default=0, description="Force refresh of remote rotation/plan (1=yes)"),
+    batch_n: int = Query(default=30, description="How many items to process in this call"),
+    dry_run: int = Query(default=0, description="If 1, don't invoke discover; just return the batch"),
 ):
+    """
+    Behavior:
+      - If a generator PLAN is available (URL/file/env), synthesize `batch_n` items from it.
+      - Else, consume a contiguous `batch_n` window from the flat rotation list deterministically per day.
+    """
+
+    # Merge JSON body over query params
     body: Dict[str, Any] = {}
     if request.method == "POST":
         try:
             body = await request.json()
         except Exception:
             body = {}
-
-    # allow overrides from body as well
-    index = body.get("index", index)
     day_seed = body.get("day_seed", day_seed)
-    offset = int(body.get("offset", offset))
+    offset   = int(body.get("offset", offset))
     require_email = body.get("require_email", require_email)
-    limit = body.get("limit", limit)
-    refresh = int(body.get("refresh", refresh or 0))
+    limit    = body.get("limit", limit)
+    refresh  = int(body.get("refresh", refresh or 0))
+    batch_n  = int(body.get("batch_n", batch_n))
+    dry_run  = int(body.get("dry_run", dry_run))
 
-    plan = _load_rotation_plan(force_refresh=bool(refresh))
-    chosen = _pick_rotation(plan, index=index, day_seed=day_seed, offset=offset)
+    # Prefer PLAN if available
+    plan = _load_generator_plan(force_refresh=bool(refresh))
+    picked: List[Dict[str, Any]] = []
+    source = "plan" if plan else "rotation"
 
-    query = str(chosen.get("query") or "").strip()
-    city = str(chosen.get("city") or "").strip()
-    if not query or not city:
-        raise HTTPException(status_code=500, detail="Chosen rotation item missing query or city")
+    if plan:
+        items = _synth_queries_from_plan(plan, day_seed, batch_n*2)  # synth a few extra to avoid duplicates
+        # enforce unique and truncate to batch_n
+        seen: set[Tuple[str, str]] = set()
+        for it in items:
+            k = (it["query"].lower(), it["city"].lower())
+            if k in seen: continue
+            seen.add(k); picked.append(it)
+            if len(picked) >= batch_n: break
+        # allow override of per-run limit
+        if limit:
+            for it in picked: it["limit"] = int(limit)
+    else:
+        # Flat rotation mode
+        plan_list = _load_rotation_plan(force_refresh=bool(refresh))
+        if not plan_list:
+            raise HTTPException(status_code=500, detail="Rotation plan is empty")
 
-    final_limit = int(limit or chosen.get("limit") or 10)
+        days = _days_since_epoch_au(date.fromisoformat(day_seed)) if day_seed else _days_since_epoch_au()
+        base_idx = (days * batch_n + offset) % len(plan_list)
 
-    argv = ["discover", "--query", query, "--city", city, "--limit", str(final_limit)]
-    if require_email is True:
-        argv += ["--require-email"]
-    elif require_email is False:
-        argv += ["--no-require-email"]
+        for k in range(max(1, batch_n)):
+            idx = (base_idx + k) % len(plan_list)
+            chosen = plan_list[idx]
+            query = str(chosen.get("query") or "").strip()
+            city  = str(chosen.get("city") or "").strip()
+            if not query or not city:
+                continue
+            picked.append({
+                "query": query,
+                "city": city,
+                "limit": int(limit or chosen.get("limit") or 60)
+            })
 
-    try:
-        oc.invoke(argv)
-        return {
-            "ok": True,
-            "argv": argv,
-            "picked": {"query": query, "city": city, "limit": final_limit},
-            "meta": {
-                "plan_len": len(plan),
-                "index": index,
-                "day_seed": day_seed,
-                "offset": offset,
-                "refreshed": bool(refresh),
-                "source": (
-                    "file" if os.path.isfile(os.getenv("ECO_LOCAL_DISCOVER_ROTATION_FILE", "/config/discover_rotation.json"))
-                    else ("env" if os.getenv("ECO_LOCAL_DISCOVER_ROTATION") else "url_or_default")
-                ),
-            },
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    if dry_run:
+        return {"ok": True, "dry_run": True, "source": source, "batch": picked}
+
+    # Execute sequentially
+    results = {"ok": True, "source": source, "processed": 0, "errors": 0, "items": []}
+    for item in picked:
+        argv = ["discover", "--query", item["query"], "--city", item["city"], "--limit", str(item["limit"])]
+        if require_email is True:
+            argv += ["--require-email"]
+        elif require_email is False:
+            argv += ["--no-require-email"]
+
+        try:
+            oc.invoke(argv)
+            results["processed"] += 1
+            results["items"].append({"argv": argv, "status": "ok"})
+        except Exception as e:
+            results["errors"] += 1
+            results["items"].append({"argv": argv, "status": "error", "detail": str(e)})
+
+    results["meta"] = {
+        "batch_n": batch_n,
+        "day_seed": day_seed,
+        "offset": offset,
+        "refreshed": bool(refresh),
+    }
+    return results

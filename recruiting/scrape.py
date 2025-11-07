@@ -1,25 +1,28 @@
 # pyright: reportMissingImports=false
-# # recruiting/scrape.py
+# recruiting/scrape.py
 from __future__ import annotations
 
 import os
 import re
 import io
 import json
+import time
 import logging
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, quote_plus
 
 import httpx
 from bs4 import BeautifulSoup
 
-# Places is optional; discovery will still work via Google CSE if Places key not set
+# Places is optional; discovery still works via Google CSE if Places key not set
 from . import places as _places  # type: ignore
 
 LOG = logging.getLogger("eco_local.scrape")
-_DEBUG = (os.getenv("ECO_LOCAL_SCRAPE_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"})
+if not logging.getLogger().handlers:
+    logging.basicConfig(level=os.getenv("ECO_LOCAL_LOG_LEVEL", "INFO"))
 
+_DEBUG = (os.getenv("ECO_LOCAL_SCRAPE_DEBUG", "0").strip().lower() in {"1", "true", "yes", "on"})
 def _d(msg: str) -> None:
     if _DEBUG:
         LOG.info(msg)
@@ -37,7 +40,7 @@ GUESS_GENERIC       = (os.getenv("ECO_LOCAL_GUESS_GENERIC", "0").strip().lower()
 _USER_AGENT = "EcodiaEcoLocal/scrape (https://ecodia.au)"
 _TIMEOUT = httpx.Timeout(20.0, connect=10.0)
 
-# More generous, AU-friendly path sweep
+# Broader, AU-friendly contact path sweep
 _COMMON_CONTACT_PATHS = [
     "/contact", "/contact-us", "/contacts",
     "/about", "/about-us", "/team",
@@ -50,10 +53,11 @@ _COMMON_CONTACT_PATHS = [
 
 # Third-party domains we avoid treating as first-class business websites
 _THIRD_PARTY_DOMAINS = tuple([
-    "resdiary", "opentable", "quandoo", "square.site", "linktr.ee",
+    "resdiary", "opentable", "quandoo", "sevenrooms",
+    "square.site", "linktr.ee", "shopify.com", "bigcartel.com",
     "facebook.com", "instagram.com", "tiktok.com", "x.com", "twitter.com", "linkedin.com",
-    "mindbodyonline", "setmore", "acuityscheduling", "wixsite.com",
-    "google.com/maps", "googleusercontent.com",
+    "mindbodyonline", "setmore", "acuityscheduling", "wixsite.com", "wordpress.com",
+    "google.com/maps", "googleusercontent.com", "youtube.com", "youtu.be",
 ])
 
 _GENERIC_INBOXES = ("info@", "hello@", "contact@", "enquiries@", "admin@", "office@", "support@", "sales@")
@@ -73,7 +77,6 @@ def _is_gov_domain(domain: Optional[str]) -> bool:
     d = domain.lower()
     return (".gov." in d) or d.endswith(".gov") or d.endswith(".gov.au")
 
-
 def _normalize_domain(url_or_domain: Optional[str]) -> Optional[str]:
     if not url_or_domain:
         return None
@@ -85,7 +88,6 @@ def _normalize_domain(url_or_domain: Optional[str]) -> Optional[str]:
     if host.startswith("www."):
         host = host[4:]
     return host or None
-
 
 def _base_candidates(url_or_domain: Optional[str]) -> List[str]:
     """
@@ -108,17 +110,70 @@ def _base_candidates(url_or_domain: Optional[str]) -> List[str]:
 
 # -------------------- Discovery (Places + Google CSE) --------------------
 
+def _compose_geo_phrase(city: str) -> str:
+    """
+    Compose a geo phrase that boosts AU relevance.
+    - Region-level: "Sunshine Coast"
+    - Suburb-level: "Peregian Beach Sunshine Coast" or "Peregian Beach QLD"
+    """
+    c = (city or "").strip()
+    if not c:
+        return ""
+    if c.lower() == "sunshine coast":
+        return '"Sunshine Coast"'
+    # suburb case: include the region keyword to keep scope local
+    return f'"{c}" "Sunshine Coast" OR "{c} QLD"'
+
+def _compose_query_text(query: str, city: str) -> str:
+    """
+    Tighten the PSE query for AU local discovery:
+    - Include AU focus (site:.au) and geo phrase
+    - Keep user query intact (supports "modifier noun" footprints from the plan)
+    """
+    q = (query or "").strip()
+    geo = _compose_geo_phrase(city)
+    bits = []
+    if q:
+        bits.append(q)
+    if geo:
+        bits.append(geo)
+    bits.append("site:.au")
+    # Prefer homepage-like or contact pages across the domain space
+    # (We don't force these; our crawler visits contact pages itself.)
+    return " ".join(bits).strip()
+
 def _pse_page(query: str, city: str, start: int, page_size: int = 10) -> List[Dict[str, Any]]:
     if not (GOOGLE_API_KEY and GOOGLE_PSE_CX):
         return []
-    q = f"{query} {city} site:.au"
+    q = _compose_query_text(query, city)
     url = "https://www.googleapis.com/customsearch/v1"
-    params = {"key": GOOGLE_API_KEY, "cx": GOOGLE_PSE_CX, "q": q, "num": page_size, "start": start}
+    params = {
+        "key": GOOGLE_API_KEY,
+        "cx": GOOGLE_PSE_CX,
+        "q": q,
+        "num": page_size,
+        "start": start,
+        # AU bias
+        "gl": "au",                   # target country
+        "cr": "countryAU",            # restrict results
+        "googlehost": "google.com.au",
+        "lr": "lang_en",
+        # Avoid images/news vertical
+        "searchType": None,
+    }
+    # drop None
+    params = {k: v for k, v in params.items() if v is not None}
+
     out: List[Dict[str, Any]] = []
     with _client() as c:
         r = c.get(url, params=params)
+        if r.status_code == 429:
+            _d("[pse] rate-limited; backing off 1.5s")
+            time.sleep(1.5)
+            r = c.get(url, params=params)
         r.raise_for_status()
         data = r.json()
+
     for it in (data.get("items") or []):
         link = it.get("link")
         dom = _normalize_domain(link)
@@ -129,7 +184,6 @@ def _pse_page(query: str, city: str, start: int, page_size: int = 10) -> List[Di
             continue
         out.append({"name": it.get("title"), "domain": dom, "website": f"https://{dom}"})
     return out
-
 
 def _pse_search_until(query: str, city: str, needed: int, hard_cap: int = 80) -> List[Dict[str, Any]]:
     results: List[Dict[str, Any]] = []
@@ -142,7 +196,6 @@ def _pse_search_until(query: str, city: str, needed: int, hard_cap: int = 80) ->
         start += 10
     return results
 
-
 def _places_search_until(query: str, city: str, needed: int, hard_pages: int = 5) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     if not getattr(_places, "PLACES_KEY", None):
@@ -150,7 +203,12 @@ def _places_search_until(query: str, city: str, needed: int, hard_pages: int = 5
 
     with _client() as c:
         url = "https://maps.googleapis.com/maps/api/place/textsearch/json"
-        params = {"query": f"{query} in {city}", "key": _places.PLACES_KEY, "region": "AU", "language": "en"}
+        params = {
+            "query": f"{query} in {city}",
+            "key": _places.PLACES_KEY,
+            "region": "AU",
+            "language": "en"
+        }
         token = None
         pages = 0
         while len(out) < needed and pages < hard_pages:
@@ -201,7 +259,6 @@ def _places_search_until(query: str, city: str, needed: int, hard_pages: int = 5
             filled.append(item)
     return filled
 
-
 def _dedupe_by_domain(cands: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     seen: set[str] = set()
     out: List[Dict[str, Any]] = []
@@ -213,11 +270,16 @@ def _dedupe_by_domain(cands: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         out.append(c)
     return out
 
-
 def discover_places(query: str, city: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """
+    Unified discovery that blends Places (if available) with Google PSE.
+    We fetch ~4x the target to give the email-harvester good raw material.
+    """
     target_pool = max(limit * 4, 40)
+
     places = _places_search_until(query, city, target_pool) if getattr(_places, "PLACES_KEY", None) else []
     pse    = _pse_search_until(query, city, target_pool)
+
     combined = _dedupe_by_domain([*places, *pse])
     combined = [c for c in combined if not _is_gov_domain(c.get("domain") or _normalize_domain(c.get("website")))]
     return combined
@@ -235,7 +297,6 @@ def fetch_homepage(domain_or_url: Optional[str]) -> str:
         except Exception:
             continue
     return ""
-
 
 def _discover_contact_like_links(home_html: str, base: str) -> List[str]:
     out: List[str] = []
@@ -276,7 +337,6 @@ def _discover_contact_like_links(home_html: str, base: str) -> List[str]:
             seen.add(url); out.append(url)
     return out[:24]
 
-
 def _collect_pdf_links(html: str, base: str) -> List[str]:
     urls: List[str] = []
     try:
@@ -293,7 +353,6 @@ def _collect_pdf_links(html: str, base: str) -> List[str]:
         if u not in seen:
             seen.add(u); out.append(u)
     return out[:10]
-
 
 def _extract_emails_from_pdf_bytes(raw: bytes) -> List[str]:
     emails: List[str] = []
@@ -318,7 +377,6 @@ def _extract_emails_from_pdf_bytes(raw: bytes) -> List[str]:
             seen.add(el); out.append(e.strip())
     return out
 
-
 def fetch_common_contact_pages(domain_or_url: Optional[str]) -> List[Tuple[str, str]]:
     pages: List[Tuple[str, str]] = []
     bases = _base_candidates(domain_or_url)
@@ -340,7 +398,6 @@ def fetch_common_contact_pages(domain_or_url: Optional[str]) -> List[Tuple[str, 
                             if rr.status_code < 400 and rr.headers.get("content-type","").lower().startswith("application/pdf"):
                                 emails = _extract_emails_from_pdf_bytes(rr.content)
                                 if emails:
-                                    # store as synthetic "page" content (newline-joined emails)
                                     pages.append((purl, "\n".join(emails)))
                         except Exception:
                             pass
@@ -395,7 +452,6 @@ def fetch_common_contact_pages(domain_or_url: Optional[str]) -> List[Tuple[str, 
         if u not in seen:
             seen.add(u); out.append((u, h))
     return out
-
 
 def _sitemap_candidates(base: str) -> List[str]:
     urls: List[str] = []
@@ -454,9 +510,6 @@ _JS_STR_JOIN_EMAIL = re.compile(
 _BAD_CONTEXT = re.compile(r"(privacy|terms|cookies|policy|legal|your-privacy-rights|terms-of-use)", re.I)
 
 def _deobfuscate_cfemail(hexstr: str) -> Optional[str]:
-    """
-    Cloudflare __cf_email__ decoder.
-    """
     try:
         data = bytes.fromhex(hexstr)
         key = data[0]
@@ -467,20 +520,13 @@ def _deobfuscate_cfemail(hexstr: str) -> Optional[str]:
         return None
     return None
 
-
 def _deobfuscate_text_email(txt: str) -> List[str]:
-    """
-    Handle 'info [at] example [dot] com' & common variants.
-    """
     t = txt
-    # common bracketed/word obfuscations
     t = re.sub(r"\s*\[?\s*(?:at|@)\s*\]?\s*", "@", t, flags=re.I)
     t = re.sub(r"\s*\[?\s*(?:dot|\.|\(dot\))\s*\]?\s*", ".", t, flags=re.I)
-    # Remove stray spaces around @ and .
     t = re.sub(r"\s*@\s*", "@", t)
     t = re.sub(r"\s*\.\s*", ".", t)
     return _TEXT_EMAIL_RE.findall(t)
-
 
 def _extract_js_mailtos(html: str) -> List[str]:
     out: List[str] = []
@@ -495,7 +541,6 @@ def _extract_js_mailtos(html: str) -> List[str]:
             continue
     return out
 
-
 def _extract_more_js_emails(html: str) -> List[str]:
     out: List[str] = []
     for m in _JS_STR_JOIN_EMAIL.findall(html or ""):
@@ -509,11 +554,7 @@ def _extract_more_js_emails(html: str) -> List[str]:
             continue
     return out
 
-
 def _filter_false_positives(emails: List[str]) -> List[str]:
-    """
-    Drop obviously broken tokens like 'reserv@ion' and keep RFC-ish shape.
-    """
     out = []
     for e in emails:
         e = e.strip()
@@ -526,7 +567,6 @@ def _filter_false_positives(emails: List[str]) -> List[str]:
         if el not in seen:
             seen.add(el); ordered.append(e)
     return ordered
-
 
 def harvest_emails_from_html(html: str) -> List[str]:
     out: List[str] = []
@@ -568,7 +608,6 @@ def harvest_emails_from_html(html: str) -> List[str]:
     ordered = _filter_false_positives(ordered)
     return ordered
 
-
 def _cse_email_harvest_for_domain(domain: str, max_pages: int = 3) -> List[str]:
     """
     When site pages fail, use CSE to find inner pages (and PDFs) with emails.
@@ -590,8 +629,20 @@ def _cse_email_harvest_for_domain(domain: str, max_pages: int = 3) -> List[str]:
                 try:
                     r = c.get(
                         "https://www.googleapis.com/customsearch/v1",
-                        params={"key": GOOGLE_API_KEY, "cx": GOOGLE_PSE_CX, "q": q, "num": 10, "start": start},
+                        params={
+                            "key": GOOGLE_API_KEY, "cx": GOOGLE_PSE_CX, "q": q, "num": 10, "start": start,
+                            "gl": "au", "cr": "countryAU", "googlehost": "google.com.au", "lr": "lang_en",
+                        },
                     )
+                    if r.status_code == 429:
+                        time.sleep(1.5)
+                        r = c.get(
+                            "https://www.googleapis.com/customsearch/v1",
+                            params={
+                                "key": GOOGLE_API_KEY, "cx": GOOGLE_PSE_CX, "q": q, "num": 10, "start": start,
+                                "gl": "au", "cr": "countryAU", "googlehost": "google.com.au", "lr": "lang_en",
+                            },
+                        )
                     r.raise_for_status()
                     data = r.json()
                     for it in (data.get("items") or []):
@@ -625,13 +676,11 @@ def _cse_email_harvest_for_domain(domain: str, max_pages: int = 3) -> List[str]:
     out = _filter_false_positives(out)
     return out
 
-
 def _guess_generics_for_domain(domain: Optional[str]) -> List[str]:
     d = (domain or "").strip().lower()
     if not d:
         return []
     return [g + d for g in _GENERIC_INBOXES]
-
 
 def harvest_emails_for_domain(domain_or_url: Optional[str]) -> List[str]:
     emails: List[str] = []
