@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Callable, Tuple
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from email.utils import parseaddr
+from .branding import header_logo_src_email  # add this import at top
 
 try:
     import httpx  # prefer httpx if available
@@ -523,6 +524,7 @@ def _render_times_block(slots: List[CandidateSlot]) -> str:
     )
 
 def _signature_block() -> str:
+    logo = header_logo_src_email()
     # marker + data attribute for reliable de-dup and insertion
     return f"""
 <!--ECOL_SIGNATURE_START-->
@@ -530,7 +532,7 @@ def _signature_block() -> str:
   <table cellpadding="0" cellspacing="0" role="presentation" style="margin-top:16px;">
     <tr>
       <td style="padding-right:12px; vertical-align:top;">
-        <img src="{_LOGO_SRC}" alt="ECO Local logo" width="110" style="display:block; border:0;">
+      <img src="{logo}" alt="ECO Local logo" width="110" style="display:block; border:0;">
       </td>
       <td style="vertical-align:top;">
         <div style="font-family:'Arial Narrow','Roboto Condensed',Arial,sans-serif; font-size:13px; line-height:1.4;">

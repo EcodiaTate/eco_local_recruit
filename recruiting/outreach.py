@@ -217,6 +217,7 @@ def _render_times_block(slots: List[Dict[str, Any]]) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _signature() -> str:
+    logo = header_logo_src_email()
     # Include both a comment marker and a data attribute for robust detection.
     # Use LOGO_SRC resolved via branding (always https/data).
     return f"""
@@ -225,8 +226,8 @@ def _signature() -> str:
 <table cellpadding="0" cellspacing="0" role="presentation" style="margin-top:16px;">
   <tr>
     <td style="padding-right:12px; vertical-align:top;">
-      <img src="{LOGO_SRC}" alt="ECO Local logo"
-           width="110" style="display:block; border:0;">
+          <img src="{logo}" alt="ECO Local logo" width="110" style="display:block; border:0;">
+
     </td>
     <td style="vertical-align:top;">
       <div style="font-family:'Arial Narrow','Roboto Condensed',Arial,sans-serif; font-size:13px; line-height:1.4;">

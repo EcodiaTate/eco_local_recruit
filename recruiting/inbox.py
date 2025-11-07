@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from .branding import header_logo_src_email  # add this import at top
 
 from .config import settings
 from .gmail_client import fetch_unseen_since
@@ -127,17 +128,13 @@ def signature_inline_images() -> List[dict]:
     return []
 
 def _signature_html() -> str:
-    # Choose src depending on strategy
-    if _LOGO_SPEC.get("use_cid") and _LOGO_SPEC.get("bytes"):
-        logo_src = f"cid:{_LOGO_SPEC['cid']}"
-    else:
-        logo_src = _LOGO_SPEC.get("public_src") or "https://elocal.ecodia.au/static/brand/ecolocal-logo-transparent.png"
+    logo = header_logo_src_email()
 
     return f"""
 <table cellpadding="0" cellspacing="0" role="presentation" style="margin-top:16px;">
   <tr>
     <td style="padding-right:12px; vertical-align:top;">
-      <img src="{logo_src}" alt="ECO Local logo" width="110" style="display:block; border:0;">
+      <img src="{logo}" alt="ECO Local logo" width="110" style="display:block; border:0;">
     </td>
     <td style="vertical-align:top;">
       <div style="font-family:'Arial Narrow','Roboto Condensed',Arial,sans-serif; font-size:13px; line-height:1.4;">
