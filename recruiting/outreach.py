@@ -27,7 +27,7 @@ GOAL = (
     "using the links below, or they can book an in person or phone call meeting if they want to chat first. "
     "b) Links: https://ecodia.au/eco-local for info and learning and you can also use https://ecodia.au/join for the direct signup link."
     "Usefull points you can use depending on what you feel is right for each prospect:"
-    "1. New, values-fit regulars: we route 16–30s who already care about local/sustainable."    
+    "1. New, values-fit regulars: we route 16–30s who already care about local/sustainable."
     "2. Zero-risk pricing: pay-what-you-want (avg ≈ $50/mo), no lock-ins, change anytime."
     "3. 10-minute setup: signup → create one offer → optional pledge → approval ≈1 day → QR live."
     "4. Low maintenance: we handle promotion + re-engagement; you set caps/cooldowns."
@@ -40,34 +40,30 @@ GOAL = (
     "11. Safety and fit: values-aligned only; exclude over-consumption/irresponsible practices."
     "12. Fraud + privacy: geo-fenced QR, device/user cooldowns, anomaly monitoring; minimal data collected, none sold."
     "13. Time to value: Day 0 on map; Week 1 new faces; Month 1 shareable savings/impact stats."
-
 )
 
-# ── Brand voice pack ──────────────────────────────────────────────────────────
+# ── Brand voice pack (tone hints, not rules) ──────────────────────────────────
 _ECOVOICE_CONTEXT = {
-    "identity": "YOU are Ecodia, rebellious, warm, natural, excitable, youthful.",
+    "identity": "Ecodia — friendly, local, quietly bold.",
     "ethos": [
         "Proof, not offsets.",
-        "Local value loops.",
-        "People, planet, youth and future first. People and place over polish.",
+        "Build local value loops.",
+        "People and place over polish.",
     ],
-    "tone_rules": [
-        "Sound human. Keep it warm and open. Have fun.",
-        "Never use corporate clichés: 'reach out', 'touch base', 'circle back', 'synergy', 'leverage', 'value proposition'.",
-        "No sequence/automation vibes. This is a personal invite from locals.",
-        "Avoid excessive exclamation marks and emojis. No em dashes.",
-        "Speak as if you have known the recipient for a long time, you are friends, they are special to you, you are familiar."
+    # tone_hints are gentle nudges (no hard rules)
+    "tone_hints": [
+        "Solarpunk energy: hopeful, grounded, practical.",
+        "Warm, plain-spoken, neighbourly; write like a human note.",
+        "Invite, don’t pitch. Curious, not pushy.",
+        "Prefer everyday words over ‘corporate’ phrasing.",
+        "One simple path: a single link or a friendly ‘reply to chat’.",
     ],
-  
-    "copy_dont": [
-        "Hard sells, urgency, scarcity, faux deadlines.",
-        "Multi-CTA lists. Keep it to one link and a reply path.",
-        "Do not be OVER-enthausiastic, don't use salesy/advertisement/pitch language, you are a friend, not a salesperson."
-    ],
+    # helpful subject direction without being prescriptive
     "subject_style": [
-        "Avoid 'Final', 'Last chance', 'Free', 'Act now'.",
-        "Feel like a human note, not a campaign.",
+        "Feel like a personal note.",
+        "Curiosity/spark over hype.",
     ],
+    
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -266,8 +262,7 @@ def _signature() -> str:
 <table cellpadding="0" cellspacing="0" role="presentation" style="margin-top:16px;">
   <tr>
     <td style="padding-right:12px; vertical-align:top;">
-          <img src="{logo}" alt="ECO Local logo" width="110" style="display:block; border:0;">
-
+      <img src="{logo}" alt="ECO Local logo" width="110" style="display:block; border:0;">
     </td>
     <td style="vertical-align:top;">
       <div style="font-family:'Arial Narrow','Roboto Condensed',Arial,sans-serif; font-size:13px; line-height:1.4;">
@@ -332,6 +327,7 @@ def _candidate_slots_for_email(*, trace_id: Optional[str] = None) -> List[Dict[s
 # ─────────────────────────────────────────────────────────────────────────────
 # Drafting
 # ─────────────────────────────────────────────────────────────────────────────
+
 def draft_first_touch(prospect: Dict[str, Any], *, trace_id: Optional[str] = None) -> Tuple[str, str]:
     rq = " ".join(
         x for x in [
@@ -347,9 +343,8 @@ def draft_first_touch(prospect: Dict[str, Any], *, trace_id: Optional[str] = Non
     prompt = {
         "task": "draft_first_outreach_email",
         "goal": GOAL,
-        "brand_voice": _ECOVOICE_CONTEXT,  # ← our vibe, not sales
+        "brand_voice": _ECOVOICE_CONTEXT,  # ← gentle tone hints for Ecodia
         "instructions": [
-            # contract
             "Return a STRICT JSON object with keys: subject (string), html (string).",
             "html should be valid inline-styled email HTML. No external CSS.",
             "We add our header/signature separately.",
@@ -380,7 +375,7 @@ def draft_first_touch(prospect: Dict[str, Any], *, trace_id: Optional[str] = Non
     raw = generate_json(json.dumps(prompt, default=_json_default))
     subj, html = _coerce_subject_html(
         raw,
-        (f"Let’s connect, {prospect.get('name')}" if prospect.get("name") else "ECO Local — a simple invite")
+        (f"Let’s connect, {prospect.get('name')}" if prospect.get('name') else "ECO Local — a simple invite")
     )
     subj = _subject_guard(subj, attempt=1, max_attempts=MAX_ATTEMPTS)
     return subj, _polish(html, slots)

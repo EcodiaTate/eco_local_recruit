@@ -3,21 +3,22 @@ from __future__ import annotations
 
 import os
 import sys
+import json
 import platform
 import logging
 from datetime import datetime, timedelta, date
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from dotenv import load_dotenv; load_dotenv()
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from zoneinfo import ZoneInfo
+from pathlib import Path
 
 from recruiting.runsheet import (
- 
     hourly_inbox_poll,
 )
 from recruiting.config import settings
@@ -26,7 +27,6 @@ from recruiting.referrals_router import router as referrals_router
 from recruiting.timezones import resolve_tz
 from recruiting import orchestrator_cli as oc
 from recruiting.referral_jobs import router as dev_router
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Boot logs (handy in Cloud Run)
@@ -73,9 +73,6 @@ app.include_router(dev_router)
 # ──────────────────────────────────────────────────────────────────────────────
 # Static (robust for local + prod)
 # ──────────────────────────────────────────────────────────────────────────────
-# Static (robust for local + prod)
-from pathlib import Path
-
 APP_FILE = Path(__file__).resolve()
 APP_DIR = APP_FILE.parent                    # .../eco_local/app
 PKG_ROOT = APP_DIR.parent                    # .../eco_local
@@ -100,8 +97,6 @@ if not STATIC_DIR:
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 log.info("Mounted static directory at /static from %s", STATIC_DIR)
 
-
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Timezone / utilities
 # ──────────────────────────────────────────────────────────────────────────────
@@ -117,7 +112,6 @@ def _parse_date_iso(date_iso: Optional[str]) -> date:
     except Exception:
         return datetime.now(LOCAL_TZ).date()
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Health
 # ──────────────────────────────────────────────────────────────────────────────
@@ -125,9 +119,8 @@ def _parse_date_iso(date_iso: Optional[str]) -> date:
 def healthz() -> Dict[str, Any]:
     return {"ok": True, "service": "eco_local-recruit", "env": settings.ENV}
 
-
 # ──────────────────────────────────────────────────────────────────────────────
-# Orchestrator endpoints
+# Orchestrator endpoints (existing)
 # ──────────────────────────────────────────────────────────────────────────────
 @app.post("/eco_local/recruit/outreach/build")
 def outreach_build(
@@ -187,7 +180,132 @@ def poll_inbox() -> Dict[str, int]:
 @app.post("/eco_local/recruit/signup/webhook")
 async def signup_webhook(req: Request) -> Dict[str, bool]:
     payload = await req.json()
-    # Keep it simple: mark “won” if payload indicates signup=true; extend as needed.
     from recruiting.store import mark_signup_payload
     mark_signup_payload(payload)
     return {"ok": True}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# NEW: Rotating discovery endpoint
+# ──────────────────────────────────────────────────────────────────────────────
+"""
+Rotation plan source (first found wins):
+
+1) ENV var ECO_LOCAL_DISCOVER_ROTATION as JSON list:
+   [
+     {"query": "sunshine coast cafes", "city": "Sunshine Coast", "limit": 60},
+     {"query": "brisbane thrift stores", "city": "Brisbane", "limit": 60},
+     {"query": "organic farms", "city": "Sunshine Coast", "limit": 60}
+   ]
+
+2) Default rotation baked in below.
+
+Selection:
+- default index = days since 1970-01-01 in Australia/Brisbane modulo len(plan)
+- override with ?index=2 or ?day_seed=2025-11-07 or ?offset=+1
+"""
+DEFAULT_ROTATION: List[Dict[str, Any]] = [
+    {"query": "sunshine coast cafes",   "city": "Sunshine Coast", "limit": 60},
+    {"query": "brisbane thrift stores", "city": "Brisbane",        "limit": 60},
+    {"query": "organic farms",          "city": "Sunshine Coast",  "limit": 60},
+    {"query": "zero waste shops",       "city": "Brisbane",        "limit": 60},
+    {"query": "farmers markets",        "city": "Sunshine Coast",  "limit": 60},
+]
+
+def _load_rotation_plan() -> List[Dict[str, Any]]:
+    raw = os.getenv("ECO_LOCAL_DISCOVER_ROTATION")
+    if raw:
+        try:
+            plan = json.loads(raw)
+            if isinstance(plan, list) and all(isinstance(x, dict) for x in plan) and plan:
+                return plan  # valid
+        except Exception:
+            log.warning("ECO_LOCAL_DISCOVER_ROTATION env present but not valid JSON; using default.")
+    return DEFAULT_ROTATION
+
+def _days_since_epoch_au(dt: Optional[date] = None) -> int:
+    tz = LOCAL_TZ
+    now = datetime.now(tz) if dt is None else datetime(dt.year, dt.month, dt.day, tzinfo=tz)
+    epoch = datetime(1970, 1, 1, tzinfo=tz)
+    return (now - epoch).days
+
+def _pick_rotation(plan: List[Dict[str, Any]], *, index: Optional[int], day_seed: Optional[str], offset: int) -> Dict[str, Any]:
+    if not plan:
+        raise HTTPException(status_code=500, detail="Rotation plan is empty")
+    if index is not None:
+        idx = index % len(plan)
+    else:
+        seed_date: Optional[date] = None
+        if day_seed:
+            try:
+                seed_date = datetime.fromisoformat(day_seed).date()
+            except Exception:
+                try:
+                    seed_date = date.fromisoformat(day_seed)
+                except Exception:
+                    raise HTTPException(status_code=400, detail="Invalid day_seed format (use YYYY-MM-DD)")
+        base = _days_since_epoch_au(seed_date)
+        idx = base % len(plan)
+        if offset:
+            idx = (idx + offset) % len(plan)
+    return plan[idx]
+
+@app.api_route("/eco_local/recruit/discover/rotate", methods=["GET", "POST"])
+async def discover_rotate(
+    request: Request,
+    # Optional overrides (work for GET query params or POST JSON fields)
+    index: int | None = Query(default=None, description="Pick specific rotation index"),
+    day_seed: str | None = Query(default=None, description="ISO date to seed rotation, e.g. 2025-11-07"),
+    offset: int = Query(default=0, description="Offset from seeded index (can be negative)"),
+    require_email: bool | None = Query(default=None, description="Override require-email gate"),
+    limit: int | None = Query(default=None, description="Override per-run limit"),
+):
+    # Merge GET query and POST JSON (POST wins)
+    body: Dict[str, Any] = {}
+    if request.method == "POST":
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+
+    # Allow fields via body as well:
+    index = body.get("index", index)
+    day_seed = body.get("day_seed", day_seed)
+    offset = int(body.get("offset", offset))
+    require_email = body.get("require_email", require_email)
+    limit = body.get("limit", limit)
+
+    plan = _load_rotation_plan()
+    chosen = _pick_rotation(plan, index=index, day_seed=day_seed, offset=offset)
+
+    query = str(chosen.get("query") or "").strip()
+    city = str(chosen.get("city") or "").strip()
+    if not query or not city:
+        raise HTTPException(status_code=500, detail="Chosen rotation item missing query or city")
+
+    final_limit = int(limit or chosen.get("limit") or 10)
+
+    argv = ["discover", "--query", query, "--city", city, "--limit", str(final_limit)]
+    if require_email is True:
+        argv += ["--require-email"]
+    elif require_email is False:
+        argv += ["--no-require-email"]
+
+    try:
+        oc.invoke(argv)
+        return {
+            "ok": True,
+            "argv": argv,
+            "picked": {
+                "query": query,
+                "city": city,
+                "limit": final_limit,
+            },
+            "meta": {
+                "plan_len": len(plan),
+                "index": index,
+                "day_seed": day_seed,
+                "offset": offset,
+            },
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
