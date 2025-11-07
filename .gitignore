@@ -25,3 +25,7 @@ secrets/
 .turbo/
 .vscode/
 .DS_Store
+.env
+secrets/
+*.key
+*.json
