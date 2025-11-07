@@ -22,8 +22,10 @@ from recruiting.runsheet import (
 )
 from recruiting.config import settings
 from recruiting.debug_semantic import router as debug_semantic_router
+from recruiting.referrals_router import router as referrals_router
 from recruiting.timezones import resolve_tz
 from recruiting import orchestrator_cli as oc
+from recruiting.referral_jobs import router as dev_router
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -65,18 +67,39 @@ app.add_middleware(
 )
 
 app.include_router(debug_semantic_router)
-
+app.include_router(referrals_router)
+app.include_router(dev_router)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Static (robust/optional)
+# Static (robust for local + prod)
 # ──────────────────────────────────────────────────────────────────────────────
-# Default to baked-in image path; override with ECO_LOCAL_STATIC_DIR
-STATIC_DIR = os.getenv("ECO_LOCAL_STATIC_DIR", "/app/static")
-if os.path.isdir(STATIC_DIR):
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-    log.info("Mounted static directory at /static from %s", STATIC_DIR)
-else:
-    log.warning("Static dir not found (%s); skipping mount", STATIC_DIR)
+# Static (robust for local + prod)
+from pathlib import Path
+
+APP_FILE = Path(__file__).resolve()
+APP_DIR = APP_FILE.parent                    # .../eco_local/app
+PKG_ROOT = APP_DIR.parent                    # .../eco_local
+REPO_ROOT = PKG_ROOT.parent                  # .../EcodiaOS
+
+ENV_STATIC = os.getenv("ECO_LOCAL_STATIC_DIR")
+
+CANDIDATES = [
+    ENV_STATIC,                              # explicit override wins
+    str(PKG_ROOT / "static"),                # prefer eco_local/static  ✅
+    str(APP_DIR / "static"),                 # optional: app/static
+    str(REPO_ROOT / "static"),               # fallback: EcodiaOS/static
+]
+
+STATIC_DIR = next((p for p in CANDIDATES if p and os.path.isdir(p)), None)
+
+if not STATIC_DIR:
+    STATIC_DIR = str(PKG_ROOT / "static")
+    os.makedirs(STATIC_DIR, exist_ok=True)
+    log.info("Created local static directory at %s", STATIC_DIR)
+
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+log.info("Mounted static directory at /static from %s", STATIC_DIR)
+
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -11,7 +11,7 @@ import base64
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
-from datetime import datetime, timezone
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from .config import settings
@@ -36,7 +36,7 @@ else:
     logging.getLogger().setLevel(_level)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Signature helpers (patched)
+# Signature helpers (URL by default; CID when local file is present)
 # ──────────────────────────────────────────────────────────────────────────────
 
 _LOGO_CID = "ecolocal-logo"
@@ -344,7 +344,7 @@ def triage_and_update(message: Dict[str, Any]) -> Dict[str, Any]:
         return {"action": "no_send", "reason": "missing_fields", "external_id": external_id, "trace_id": trace_id}
 
     # Rephrase “attached” → “below” when no non-ICS attachments present
-    has_non_ics_attachment = False  # we’re not attaching files here
+    has_non_ics_attachment = False
     if not has_non_ics_attachment:
         lowered = html_raw.lower()
         if "attached" in lowered or "attachment" in lowered:
@@ -380,7 +380,6 @@ def triage_and_update(message: Dict[str, Any]) -> Dict[str, Any]:
 
         log_reply_draft(prospect=prospect, subject=subject, html=html, metadata={"thread_id": envelope.thread_id or "", **meta})
     except TypeError:
-        # older signature
         try:
             log_reply_draft(prospect, subject, html)
         except Exception:
@@ -394,7 +393,7 @@ def triage_and_update(message: Dict[str, Any]) -> Dict[str, Any]:
             to=to_addr,
             subject=subject,
             html=html,
-            inline_images=signature_inline_images(),
+            inline_images=signature_inline_images(),  # URL mode => [], CID mode => [{'cid','bytes'}]
             reply_to_message_id=message.get("rfc_message_id") or None,
             references=([message.get("rfc_message_id")] if message.get("rfc_message_id") else None),
             ics=ics_attachment,
@@ -403,7 +402,7 @@ def triage_and_update(message: Dict[str, Any]) -> Dict[str, Any]:
     except Exception:
         log.exception("[inbox] failed to send reply email")
 
-    # Mark WON based on LLM action only (no keyword heuristics)
+    # Mark WON based on LLM action only
     try:
         if prospect and getattr(flow.booking, "action", None) == "event":
             mark_reply_won(prospect)

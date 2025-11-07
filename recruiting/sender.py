@@ -1,4 +1,3 @@
-# recruiting/sender.py
 from __future__ import annotations
 
 import mimetypes
@@ -28,7 +27,6 @@ except Exception:
 log = logging.getLogger(__name__)
 
 _ses = boto3.client("ses", region_name=settings.SES_REGION)
-
 
 # ─────────────────────────────────────────────────────────
 # Helpers
@@ -71,12 +69,11 @@ def _coerce_ics(ics: Optional[Union[Tuple[str, bytes], object]]) -> Optional[Tup
             return None
     return None
 
-
 # ─────────────────────────────────────────────────────────
 # MIME construction
 # ─────────────────────────────────────────────────────────
+
 def _add_calendar_alternative(alt_container: EmailMessage, *, ics_bytes: bytes) -> None:
-    # Add a text/calendar alternative (REQUEST) so clients render RSVP UI
     alt_container.add_attachment(
         ics_bytes,
         maintype="text",
@@ -87,12 +84,7 @@ def _add_calendar_alternative(alt_container: EmailMessage, *, ics_bytes: bytes) 
     )
 
 def _attach_calendar_part(container: EmailMessage, *, ics_name: str, ics_bytes: bytes) -> None:
-    """
-    Attach a calendar invite as: text/calendar; method=REQUEST; charset=UTF-8
-    with base64 CTE and a filename, so clients render RSVP UI.
-    """
     cal = EmailMessage()
-    # set_content handles correct headers and base64 encoding when cte="base64"
     cal.set_content(
         ics_bytes,
         maintype="text",
@@ -143,7 +135,6 @@ def _build_mime(
         if refs_norm:
             root["References"] = refs_norm
 
-    # Always multipart/mixed
     root.make_mixed()
 
     # multipart/alternative (text/plain + text/html)
@@ -160,6 +151,7 @@ def _build_mime(
             cid = (str(img.get("cid") or "inline").strip() or "inline").strip("<>")
             data: Optional[bytes] = None
             path = img.get("path")
+
             if "bytes" in img and isinstance(img["bytes"], (bytes, bytearray)):
                 data = bytes(img["bytes"])
             elif path:
@@ -177,14 +169,27 @@ def _build_mime(
                 if g:
                     guessed = g
             maintype, subtype = guessed.split("/", 1)
-            related.add_attachment(
+
+            # Build the inline image part without filename to avoid auto Content-Disposition
+            img_part = EmailMessage()
+            img_part.set_content(
                 data,
                 maintype=maintype,
                 subtype=subtype,
-                filename=(path or f"{cid}.img"),
-                cid=f"<{cid}>",
-                disposition="inline",
+                cte="base64",
+                # IMPORTANT: no filename here
             )
+
+            # Make sure there is only one Content-Disposition header, set to inline
+            if img_part.get("Content-Disposition"):
+                del img_part["Content-Disposition"]
+            img_part.add_header("Content-Disposition", "inline", filename=(path or f"{cid}.img"))
+
+            img_part.add_header("Content-ID", f"<{cid}>")
+            img_part.add_header("Content-Location", f"cid:{cid}")
+            img_part.add_header("X-Attachment-Id", cid)
+
+            related.attach(img_part)
 
         root.attach(related)
     else:
@@ -192,12 +197,9 @@ def _build_mime(
 
     ics_tup = _coerce_ics(ics)
     if ics_tup:
-        # 1) Put a calendar *alternative* for smart clients
         _add_calendar_alternative(alt, ics_bytes=ics_tup[1])
-        # 2) Also attach a separate calendar attachment for clients that only parse attachments
         _attach_calendar_part(root, ics_name=ics_tup[0], ics_bytes=ics_tup[1])
 
-    # Regular attachments
     for (fname, mime, content) in (attachments or []):
         maintype, subtype = (mime.split("/", 1) if "/" in mime else ("application", "octet-stream"))
         root.add_attachment(content, maintype=maintype, subtype=subtype, filename=fname)
@@ -205,7 +207,6 @@ def _build_mime(
     raw = root.as_bytes()
     _save_eml_if_enabled(raw, subject)
     return raw
-
 
 # ─────────────────────────────────────────────────────────
 # SES send
@@ -226,8 +227,6 @@ def send_email(
     Send via SES.
     - Raw path for anything that needs threading/attachments/ICS/inline images.
     - Simple path for HTML-only mail.
-    - Uses bare addresses in the SES envelope.
-    - Supports optional BCC debug and SES configuration sets.
     """
     try:
         bare_to = _bare(to)

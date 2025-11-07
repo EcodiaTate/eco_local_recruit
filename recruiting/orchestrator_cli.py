@@ -35,7 +35,6 @@ from .calendar_client import (
     list_holds,
     find_thread_confirmed,
 )
-# NOTE: we also import two "private" helpers so the CLI can call raw freebusy
 from .calendar_client import _tz as _cal_tz  # type: ignore
 from .calendar_client import _build_calendar_service  # type: ignore
 from .config import settings
@@ -53,7 +52,7 @@ try:
 except Exception as e_rel:
     try:
         # Fallback absolute (repo installed or shimmed path)
-        from eco_local.seed_cli import upsert_prospect, qualify_basic  # type: ignore
+        from ..seed_cli import upsert_prospect, qualify_basic  # type: ignore
         from eco_local.recruiting import scrape as _scrape  # type: ignore
         from eco_local.recruiting import parse as _parse    # type: ignore
         from eco_local.recruiting import qualify as _qualify  # type: ignore

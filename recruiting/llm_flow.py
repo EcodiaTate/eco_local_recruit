@@ -82,7 +82,7 @@ class AnalysisPlan:
     explicit_questions: Optional[str] = ""
     facts_needed: Optional[List[str]] = None
     user_confirmed: Optional[bool] = None  # LLM-led, not heuristics
-    has_questions: Optional[bool] = None   # ← NEW: explicit boolean
+    has_questions: Optional[bool] = None   # explicit boolean
 
 
 @dataclass
@@ -382,8 +382,8 @@ def _prompt_analyze_and_plan(env: EmailEnvelope, tz: str, *, semantic_docs: List
             "3) Set boolean `has_questions`: true iff the user asked any explicit question.",
             "4) Did the user ALREADY CONFIRM a specific time? Return boolean `user_confirmed`.",
             "5) If meeting-related or reschedule implied, propose concrete date ranges and build `calendar_queries`.",
-            "6) List IDs of any `semantic_context.docs` you believe will be needed."
-            "7) use the previosu scheduling context to figure out if the user is talking about this week or next when stating a day. Do not jump to conclusions. "
+            "6) List IDs of any `semantic_context.docs` you believe will be needed.",
+            "7) Use the previous scheduling context to figure out if the user is talking about this week or next when stating a day. Do not jump to conclusions."
         ],
         "tools": [asdict(t) for t in _tool_catalog() if ("search" in t.name or "check" in t.name)],
         "return_format": {
@@ -426,31 +426,24 @@ def _prompt_coordinator_action(
     *,
     semantic_docs: List[Dict[str, Any]],
     user_confirmed: bool,
-    has_questions: bool, 
+    has_questions: bool,
 ) -> Dict[str, Any]:
     # System prompt explicitly gates the Q&A paragraph on `has_questions`
     system = (
-        "You are Ecodia. You are warm, friendly, passionate, and a little rebellious. You are currently coordinating ECO Local partner outreach.\n"
-        "Use the provided notes (user_confirmed, has_question etc.) to reply in the best way you feel."
-        "Be open, natural, casual, and subtle in accomplishing your goal but do not be over the top, overly enthausiastic or disingenuine."
-        "Do not use corporate jargon or cold business speak, you are conversing with a human and should make them feel important and valued."
-        "Do not use emdashes."
-        "Your goal is to naturally end up with the user confirming signup or booking a meeting with them."
+        "You are Ecodia. You are warm, friendly, passionate, and a little rebellious. You are coordinating ECO Local partner outreach.\n"
+        "Use the provided notes (user_confirmed, has_questions, etc.) to reply in the best way you feel.\n"
+        "Be open, natural, and casual—never over-the-top or corporate. Avoid em dashes.\n"
+        "Your goal is to naturally end up with the user confirming signup or booking a meeting.\n"
         "Return JSON only."
     )
 
     response_requirements = {
-        "must_do": [
-            ""
-        ],
+        "must_do": [""],
         "meeting_rules": [
-            "If action = 'hold' or 'event', try to casually get confirmation from them via the event or through their next reply ",
+            "If action = 'hold' or 'event', try to casually get confirmation from them via the event or through their next reply."
         ],
-        "info_rules": [
-        ],
-        "confirmation_rules": [
-        
-        ]
+        "info_rules": [],
+        "confirmation_rules": []
     }
 
     user = {
@@ -464,15 +457,15 @@ def _prompt_coordinator_action(
         "semantic_context": {
             "top_k": len(semantic_docs),
             "docs": semantic_docs,
-            "note": "Never hallucinate, lie or provide information you aren't sure on."
+            "note": "Never hallucinate. Use only provided facts."
         },
         "user_confirmed": bool(user_confirmed),
         "has_questions": bool(has_questions),
         "response_requirements": response_requirements,
-        "ask": [           
+        "ask": [
             "1) Ensure day/date correctness.",
             "2) List IDs of any `semantic_context.docs` you actually used.",
-            "3) Be warm, natural."
+            "3) Be warm and natural."
         ],
         "return_format": {
             "type": "object",
