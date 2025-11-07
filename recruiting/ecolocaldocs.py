@@ -24,7 +24,7 @@ from neo4j import GraphDatabase
 # ──────────────────────────────────────────────────────────────────────────────
 DEF_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL", "gemini-embedding-001").strip() or "gemini-embedding-001"
 DEF_DIMS = int(os.getenv("EMBED_DIMENSIONS", "3072"))  # hard-require 3072 below
-API_KEY = (os.getenv("GOOGLE_API_KEY", "AIzaSyAiCD58VjvLsPBaKvaQhbUbq5xmWj3_JDo") or os.getenv("GEMINI_API_KEY") or "").strip()
+API_KEY = (os.getenv("GOOGLE_API_KEY", "***REMOVED***") or os.getenv("GEMINI_API_KEY") or "").strip()
 
 NEO4J_URI = os.getenv("NEO4J_URI", "***REMOVED***")
 NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")

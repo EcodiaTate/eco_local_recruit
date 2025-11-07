@@ -25,7 +25,22 @@ MAX_ATTEMPTS = int(os.getenv("ECO_LOCAL_MAX_ATTEMPTS", "3"))
 GOAL = (
     "Primary goal: Get prospective business partners excited about and joined up to ECO Local. These prospects can either signup by themselves, "
     "using the links below, or they can book an in person or phone call meeting if they want to chat first. "
-    "b) Links: https://ecodia.au/eco-local andyou can also use https://ecodia.au/join for the direct signup link."
+    "b) Links: https://ecodia.au/eco-local for info and learning and you can also use https://ecodia.au/join for the direct signup link."
+    "Usefull points you can use depending on what you feel is right for each prospect:"
+    "1. New, values-fit regulars: we route 16–30s who already care about local/sustainable."    
+    "2. Zero-risk pricing: pay-what-you-want (avg ≈ $50/mo), no lock-ins, change anytime."
+    "3. 10-minute setup: signup → create one offer → optional pledge → approval ≈1 day → QR live."
+    "4. Low maintenance: we handle promotion + re-engagement; you set caps/cooldowns."
+    "5. Full control: daily caps, per-user caps, cooldowns; pause/adjust anytime"
+    "6. Real brand lift: “Proof, not offsets” tied to actual visits and savings."
+    "7. Simple impact: dashboard with scans, unique visitors, ECO given, savings, peak times, top offers."
+    "8. Youth experience is effortless: map/catalogue → use offer → single scan; no hard ID checks."
+    "9. Real relief for youth: discount/freebie first, then +ECO +XP on top."
+    "10. Always free for youth; we re-invite via email now, SMS soon."
+    "11. Safety and fit: values-aligned only; exclude over-consumption/irresponsible practices."
+    "12. Fraud + privacy: geo-fenced QR, device/user cooldowns, anomaly monitoring; minimal data collected, none sold."
+    "13. Time to value: Day 0 on map; Week 1 new faces; Month 1 shareable savings/impact stats."
+
 )
 
 # ── Brand voice pack ──────────────────────────────────────────────────────────
@@ -37,8 +52,7 @@ _ECOVOICE_CONTEXT = {
         "People, planet, youth and future first. People and place over polish.",
     ],
     "tone_rules": [
-        "Sound human. Keep it warm, plain, and clear.",
-        "Offer a chat lightly; do not push. Times are optional.",
+        "Sound human. Keep it warm and open. Have fun.",
         "Never use corporate clichés: 'reach out', 'touch base', 'circle back', 'synergy', 'leverage', 'value proposition'.",
         "No sequence/automation vibes. This is a personal invite from locals.",
         "Avoid excessive exclamation marks and emojis. No em dashes.",

@@ -792,8 +792,8 @@ def run_llm_flow(
                     thread_id=email.thread_id or None,
                     prospect_email=email.from_addr or None,
                     attendees=[{"email": _bare_email(email.from_addr)}] if email.from_addr else [],
-                    title="Ecodia — intro chat (HOLD)",
-                    description="Soft hold to make it easy. Click ‘Yes’ on the invite or reply to confirm.",
+                    title="ECO Local intro chat (HOLD)",
+                    description="Just a hold till we lock it in.",
                     tz=tz,
                     send_updates="none",
                 )
@@ -810,8 +810,8 @@ def run_llm_flow(
 
             elif booking.action == "event":
                 create_event(
-                    title="Ecodia — intro chat",
-                    description="Looking forward to our chat! Please click 'Yes' to confirm.",
+                    title="ECO Local intro chat",
+                    description="Looking forward to our chat! Let me know if you've got any questions beforehand.",
                     start_iso=s_iso,
                     end_iso=e_iso,
                     tz=tz,
