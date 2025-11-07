@@ -8,6 +8,13 @@ import platform
 import logging
 from datetime import datetime, timedelta, date
 from typing import Optional, Dict, Any, List
+# app/main.py (add near the other imports)
+import time
+from typing import Tuple
+try:
+    import httpx  # FastAPI stacks usually have it; if not, `pip install httpx`
+except Exception:
+    httpx = None  # we'll fail soft and fall back to defaults
 
 from dotenv import load_dotenv; load_dotenv()
 
@@ -203,6 +210,7 @@ Selection:
 - default index = days since 1970-01-01 in Australia/Brisbane modulo len(plan)
 - override with ?index=2 or ?day_seed=2025-11-07 or ?offset=+1
 """
+# app/main.py (keep your DEFAULT_ROTATION as-is; we’ll still use it)
 DEFAULT_ROTATION: List[Dict[str, Any]] = [
     {"query": "sunshine coast cafes",   "city": "Sunshine Coast", "limit": 60},
     {"query": "brisbane thrift stores", "city": "Brisbane",        "limit": 60},
@@ -210,17 +218,74 @@ DEFAULT_ROTATION: List[Dict[str, Any]] = [
     {"query": "zero waste shops",       "city": "Brisbane",        "limit": 60},
     {"query": "farmers markets",        "city": "Sunshine Coast",  "limit": 60},
 ]
+# app/main.py (NEW: small cache + loader that tries file -> env -> URL -> default)
+_ROTATION_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None, "etag": None}
+_ROTATION_TTL_SECONDS = int(os.getenv("ECO_LOCAL_DISCOVER_ROTATION_TTL", "600"))  # 10 min default
 
-def _load_rotation_plan() -> List[Dict[str, Any]]:
+def _load_rotation_plan(*, force_refresh: bool = False) -> List[Dict[str, Any]]:
+    """
+    Priority:
+      1) File (ECO_LOCAL_DISCOVER_ROTATION_FILE), if present and valid JSON
+      2) Env var ECO_LOCAL_DISCOVER_ROTATION (JSON)
+      3) Remote URL ECO_LOCAL_DISCOVER_ROTATION_URL (JSON)  ← your prod: https://elocal.ecodia.au/config/discover_rotation.json
+      4) DEFAULT_ROTATION (in code)
+    Caches URL result for _ROTATION_TTL_SECONDS unless force_refresh=True.
+    """
+    # 1) File override
+    path = os.getenv("ECO_LOCAL_DISCOVER_ROTATION_FILE", "/config/discover_rotation.json")
+    try:
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as f:
+                plan = json.load(f)
+                if isinstance(plan, list) and plan:
+                    return plan
+    except Exception:
+        log.warning("Rotation file invalid; ignoring: %s", path)
+
+    # 2) Env var override
     raw = os.getenv("ECO_LOCAL_DISCOVER_ROTATION")
     if raw:
         try:
             plan = json.loads(raw)
-            if isinstance(plan, list) and all(isinstance(x, dict) for x in plan) and plan:
-                return plan  # valid
+            if isinstance(plan, list) and plan:
+                return plan
         except Exception:
-            log.warning("ECO_LOCAL_DISCOVER_ROTATION env present but not valid JSON; using default.")
+            log.warning("ECO_LOCAL_DISCOVER_ROTATION invalid JSON; using fallbacks.")
+
+    # 3) Remote URL
+    url = os.getenv(
+        "ECO_LOCAL_DISCOVER_ROTATION_URL",
+        "https://elocal.ecodia.au/config/discover_rotation.json"
+    )
+    now = time.time()
+    if not force_refresh and _ROTATION_CACHE["data"] and (now - _ROTATION_CACHE["ts"] < _ROTATION_TTL_SECONDS):
+        return _ROTATION_CACHE["data"]
+
+    if httpx and url:
+        headers = {}
+        if _ROTATION_CACHE.get("etag"):
+            headers["If-None-Match"] = _ROTATION_CACHE["etag"]
+        try:
+            resp = httpx.get(url, headers=headers, timeout=5.0)
+            if resp.status_code == 304 and _ROTATION_CACHE["data"]:
+                _ROTATION_CACHE["ts"] = now
+                return _ROTATION_CACHE["data"]
+            resp.raise_for_status()
+            plan = resp.json()
+            if isinstance(plan, list) and plan:
+                _ROTATION_CACHE["data"] = plan
+                _ROTATION_CACHE["ts"] = now
+                _ROTATION_CACHE["etag"] = resp.headers.get("ETag")
+                return plan
+            else:
+                log.warning("Rotation URL returned non-list or empty JSON; falling back. url=%s", url)
+        except Exception as e:
+            log.warning("Failed to fetch rotation from URL (%s): %s", url, e)
+
+    # 4) In-code default
     return DEFAULT_ROTATION
+
+
 
 def _days_since_epoch_au(dt: Optional[date] = None) -> int:
     tz = LOCAL_TZ
@@ -248,18 +313,17 @@ def _pick_rotation(plan: List[Dict[str, Any]], *, index: Optional[int], day_seed
         if offset:
             idx = (idx + offset) % len(plan)
     return plan[idx]
-
+# app/main.py (tweak your rotate endpoint to allow refresh=?)
 @app.api_route("/eco_local/recruit/discover/rotate", methods=["GET", "POST"])
 async def discover_rotate(
     request: Request,
-    # Optional overrides (work for GET query params or POST JSON fields)
     index: int | None = Query(default=None, description="Pick specific rotation index"),
     day_seed: str | None = Query(default=None, description="ISO date to seed rotation, e.g. 2025-11-07"),
     offset: int = Query(default=0, description="Offset from seeded index (can be negative)"),
     require_email: bool | None = Query(default=None, description="Override require-email gate"),
     limit: int | None = Query(default=None, description="Override per-run limit"),
+    refresh: int = Query(default=0, description="Force refresh of remote rotation (1=yes)"),
 ):
-    # Merge GET query and POST JSON (POST wins)
     body: Dict[str, Any] = {}
     if request.method == "POST":
         try:
@@ -267,14 +331,15 @@ async def discover_rotate(
         except Exception:
             body = {}
 
-    # Allow fields via body as well:
+    # allow overrides from body as well
     index = body.get("index", index)
     day_seed = body.get("day_seed", day_seed)
     offset = int(body.get("offset", offset))
     require_email = body.get("require_email", require_email)
     limit = body.get("limit", limit)
+    refresh = int(body.get("refresh", refresh or 0))
 
-    plan = _load_rotation_plan()
+    plan = _load_rotation_plan(force_refresh=bool(refresh))
     chosen = _pick_rotation(plan, index=index, day_seed=day_seed, offset=offset)
 
     query = str(chosen.get("query") or "").strip()
@@ -295,16 +360,17 @@ async def discover_rotate(
         return {
             "ok": True,
             "argv": argv,
-            "picked": {
-                "query": query,
-                "city": city,
-                "limit": final_limit,
-            },
+            "picked": {"query": query, "city": city, "limit": final_limit},
             "meta": {
                 "plan_len": len(plan),
                 "index": index,
                 "day_seed": day_seed,
                 "offset": offset,
+                "refreshed": bool(refresh),
+                "source": (
+                    "file" if os.path.isfile(os.getenv("ECO_LOCAL_DISCOVER_ROTATION_FILE", "/config/discover_rotation.json"))
+                    else ("env" if os.getenv("ECO_LOCAL_DISCOVER_ROTATION") else "url_or_default")
+                ),
             },
         }
     except Exception as e:
