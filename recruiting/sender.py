@@ -1,3 +1,4 @@
+# recruiting/sender.py
 from __future__ import annotations
 
 import mimetypes
@@ -139,10 +140,14 @@ def _build_mime(
 
     # multipart/alternative (text/plain + text/html)
     alt = EmailMessage()
-    alt.set_content("This email includes an HTML version.")
-    alt.add_alternative(html, subtype="html")
+    # light plain fallback
+    alt.set_content("This email includes an HTML version.", charset="utf-8")
+
+    # IMPORTANT: send HTML as base64 to avoid quoted-printable line folding inside attributes
+    alt.add_alternative(html or "<html></html>", subtype="html", charset="utf-8", cte="base64")
 
     if inline_images:
+        # Ensure multipart/related so CIDs resolve
         related = EmailMessage()
         related.make_related()
         related.attach(alt)
@@ -170,19 +175,18 @@ def _build_mime(
                     guessed = g
             maintype, subtype = guessed.split("/", 1)
 
-            # Build the inline image part without filename to avoid auto Content-Disposition
             img_part = EmailMessage()
+            # Use base64 for binary
             img_part.set_content(
                 data,
                 maintype=maintype,
                 subtype=subtype,
                 cte="base64",
-                # IMPORTANT: no filename here
             )
-
             # Make sure there is only one Content-Disposition header, set to inline
             if img_part.get("Content-Disposition"):
                 del img_part["Content-Disposition"]
+            # Keep a filename only to help some clients show “download” if they detach, but not required
             img_part.add_header("Content-Disposition", "inline", filename=(path or f"{cid}.img"))
 
             img_part.add_header("Content-ID", f"<{cid}>")
@@ -195,6 +199,7 @@ def _build_mime(
     else:
         root.attach(alt)
 
+    # ICS both inline (alternative) and as an attachment so most clients behave well
     ics_tup = _coerce_ics(ics)
     if ics_tup:
         _add_calendar_alternative(alt, ics_bytes=ics_tup[1])
