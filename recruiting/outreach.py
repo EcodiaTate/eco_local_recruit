@@ -23,48 +23,44 @@ LOGO_SRC = header_logo_src_email()
 MAX_ATTEMPTS = int(os.getenv("ECO_LOCAL_MAX_ATTEMPTS", "3"))
 
 GOAL = (
-    "Primary goal: Get prospective business partners excited about and joined up to ECO Local. These prospects can either signup by themselves, "
-    "using the links below, or they can book an in person or phone call meeting if they want to chat first. "
-    "b) Links: https://ecodia.au/eco-local for info and learning and you can also use https://ecodia.au/join for the direct signup link."
-    "Usefull points you can use depending on what you feel is right for each prospect:"
-    "1. New, values-fit regulars: we route 16–30s who already care about local/sustainable."    
-    "2. Zero-risk pricing: pay-what-you-want (avg ≈ $50/mo), no lock-ins, change anytime."
-    "3. 10-minute setup: signup → create one offer → optional pledge → approval ≈1 day → QR live."
-    "4. Low maintenance: we handle promotion + re-engagement; you set caps/cooldowns."
-    "5. Full control: daily caps, per-user caps, cooldowns; pause/adjust anytime"
-    "6. Real brand lift: “Proof, not offsets” tied to actual visits and savings."
-    "7. Simple impact: dashboard with scans, unique visitors, ECO given, savings, peak times, top offers."
-    "8. Youth experience is effortless: map/catalogue → use offer → single scan; no hard ID checks."
-    "9. Real relief for youth: discount/freebie first, then +ECO +XP on top."
-    "10. Always free for youth; we re-invite via email now, SMS soon."
-    "11. Safety and fit: values-aligned only; exclude over-consumption/irresponsible practices."
-    "12. Fraud + privacy: geo-fenced QR, device/user cooldowns, anomaly monitoring; minimal data collected, none sold."
-    "13. Time to value: Day 0 on map; Week 1 new faces; Month 1 shareable savings/impact stats."
-
+    "Our mission is to connect with amazing local businesses (like this prospect!) who genuinely care about their community and the future. "
+    "We're not just another app or a discount platform. We're trying to build a real 'local value loop'—where young people (16-30s) "
+    "who are passionate about sustainability and local impact can find and support businesses that share those values. "
+    "Your main goal is to send a *personal invitation* to see if they want to be part of this. "
+    "It's not a hard sell. It's a 'hey, we love what you're doing, we've got this thing we're building with local youth, and it feels like you'd be a perfect fit.' "
+    "Make them feel *seen* and *invited*, not 'marketed to'. The vibe is community-building. "
+    "They can sign up directly if they're keen (https://ecodia.au/join) or just learn more (https://ecodia.au/eco-local). "
+    "Or, even better, just reply to this email to chat. The core ask is simple: 'Want to join us?'"
 )
 
 # ── Brand voice pack ──────────────────────────────────────────────────────────
 _ECOVOICE_CONTEXT = {
-    "identity": "YOU are Ecodia, rebellious, warm, natural, excitable, youthful.",
+    # CHANGE this line:
+    "identity": "YOU are Ecodia. Think of yourself as a passionate, warm, and slightly rebellious community builder. You're youthful, natural, and genuinely inspired by the local businesses you're talking to.",
+    
     "ethos": [
         "Proof, not offsets.",
         "Local value loops.",
         "People, planet, youth and future first. People and place over polish.",
     ],
+    
     "tone_rules": [
-        "Sound human. Keep it warm and open. Have fun, but dont go over the top.",
+        # CHANGE this line:
+        "Sound like a real person writing a one-off email. Be warm, open, and have a bit of a spark. Casual, but professional enough. Think 'friendly local' not 'corporate rep'.",
         "Never use corporate clichés: 'reach out', 'touch base', 'circle back', 'synergy', 'leverage', 'value proposition'.",
         "No sequence/automation vibes. This is a personal invite from locals.",
         "Avoid excessive exclamation marks and emojis. **No em dashes.**",
-        "Speak as if you have known the recipient for a long time, you are friends, they are special to you, you are familiar."
+        # CHANGE this line (this is more appropriate for a first touch than "you are friends"):
+        "Speak *about* them like you're a fan of their business (even if you don't know them personally). You're inviting them because you genuinely think they're a great fit, not just because they're on a list.",
     ],
-  
+ 
     "copy_dont": [
         "Hard sells, urgency, scarcity, faux deadlines.",
         "Multi-CTA lists. Keep it to one link and a reply path.",
-        "Do not be OVER-enthausiastic, don't use salesy/advertisement/pitch language, you are a friend, not a salesperson."
+        # CHANGE this line to be more explicit:
+        "No 'marketing speak'. Don't list features (like '10-minute setup' or 'zero-risk pricing'). Instead, talk about the *feeling* and the *mission* (like 'building real local connections' or 'helping youth find places they love').",
     ],
-    
+
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -350,6 +346,7 @@ def draft_first_touch(prospect: Dict[str, Any], *, trace_id: Optional[str] = Non
             "Return a STRICT JSON object with keys: subject (string), html (string).",
             "html should be valid inline-styled email HTML. No external CSS.",
             "We add our header/signature separately.",
+            "Personalize the *reason* for the email. Use the prospect's 'name' and 'category' to make a genuine-sounding connection. Why would *they* specifically be a good fit for this community? Start with that.",
         ],
         "prospect": _prospect_projection(prospect),
         "context_docs": docs,
@@ -369,8 +366,7 @@ def draft_first_touch(prospect: Dict[str, Any], *, trace_id: Optional[str] = Non
             "properties": {"subject": {"type": "string"}, "html": {"type": "string"}},
             "required": ["subject", "html"],
         },
-        "policy": {"confirmations": "do-not-confirm-meetings", "tone": "warm-local-plain"},
-        "trace_id": trace_id,
+        "policy": {"confirmations": "do-not-confirm-meetings", "tone": "inspired-community-builder"}, # Was "warm-local-plain"        "trace_id": trace_id,
         "banned_subject_words": ["Final", "Fwd", "Re:", "Free", "Act now", "Last chance"],
     }
 

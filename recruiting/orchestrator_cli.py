@@ -39,38 +39,46 @@ from .calendar_client import _tz as _cal_tz  # type: ignore
 from .calendar_client import _build_calendar_service  # type: ignore
 from .config import settings
 from .tools import calendar_suggest_windows  # agentic, scored windows
-
 # ---- discovery stack (optional imports; we handle gracefully) ----
 _HAVE_STACK = True
 try:
-    # Prefer relative (module mode)
-    from ..seed_cli import upsert_prospect, qualify_basic  # type: ignore
+    # Preferred: package-relative (when `recruiting` is a package)
     from . import scrape as _scrape  # type: ignore
     from . import parse as _parse    # type: ignore
     from . import qualify as _qualify  # type: ignore
     from . import profile as _profile  # type: ignore
+    from ..seed_cli import upsert_prospect, qualify_basic  # type: ignore
 except Exception as e_rel:
     try:
-        # Fallback absolute (repo installed or shimmed path)
-        from ..seed_cli import upsert_prospect, qualify_basic  # type: ignore
+        # Fallback: fully qualified under eco_local (when imported as eco_local.recruiting.*)
         from eco_local.recruiting import scrape as _scrape  # type: ignore
         from eco_local.recruiting import parse as _parse    # type: ignore
         from eco_local.recruiting import qualify as _qualify  # type: ignore
         from eco_local.recruiting import profile as _profile  # type: ignore
-    except Exception as e_abs:
-        _HAVE_STACK = False
-        if os.getenv("ECO_LOCAL_DEBUG", "1").lower() in {"1","true","yes","on"}:
-            import sys, pathlib
-            print("[discover] import failed (relative then absolute).")
-            print("  relative error:", repr(e_rel))
-            print("  absolute error:", repr(e_abs))
-            print("[discover] __file__:", __file__)
-            print("[discover] cwd:", os.getcwd())
-            print("[discover] sys.path[0]:", sys.path[0])
-            print("[discover] sys.path:", sys.path)
-            base = pathlib.Path(__file__).resolve().parent
-            for rel in ["scrape.py","parse.py","qualify.py","profile.py","../seed_cli.py","__init__.py"]:
-                print(f"[discover] exists {rel}? ->", (base / rel).resolve().exists())
+        from eco_local.seed_cli import upsert_prospect, qualify_basic  # type: ignore
+    except Exception as e_abs1:
+        try:
+            # Fallback: top-level recruiting.* (matches your FastAPI imports)
+            from recruiting import scrape as _scrape  # type: ignore
+            from recruiting import parse as _parse    # type: ignore
+            from recruiting import qualify as _qualify  # type: ignore
+            from recruiting import profile as _profile  # type: ignore
+            from seed_cli import upsert_prospect, qualify_basic  # type: ignore
+        except Exception as e_abs2:
+            _HAVE_STACK = False
+            if os.getenv("ECO_LOCAL_DEBUG", "1").lower() in {"1","true","yes","on"}:
+                import sys, pathlib
+                print("[discover] import failed (relative, eco_local.*, then top-level).")
+                print("  relative error:", repr(e_rel))
+                print("  eco_local error:", repr(e_abs1))
+                print("  top-level error:", repr(e_abs2))
+                print("[discover] __file__:", __file__)
+                print("[discover] cwd:", os.getcwd())
+                print("[discover] sys.path[0]:", sys.path[0])
+                print("[discover] sys.path:", sys.path)
+                base = pathlib.Path(__file__).resolve().parent
+                for rel in ["scrape.py","parse.py","qualify.py","profile.py","../seed_cli.py","__init__.py"]:
+                    print(f"[discover] exists {rel}? ->", (base / rel).resolve().exists())
 
 # ---------------- flags ----------------
 DRY_RUN = os.getenv("DRY_RUN", "0").strip().lower() in {"1", "true", "yes", "on"}
@@ -445,9 +453,13 @@ def _pre_fit_score(parsed: Dict[str, Any], domain: Optional[str]) -> Tuple[float
 
 def cmd_discover(args: argparse.Namespace) -> None:
     if not _HAVE_STACK:
-        ...
+        raise RuntimeError(
+            "Discovery stack unavailable (scrape/parse/qualify/profile/seed_cli imports failed). "
+            "Fix package layout or sys.path. Ensure recruiting/__init__.py exists and that either "
+            "top-level 'recruiting.*' or 'eco_local.recruiting.*' is importable."
+        )
     store.ensure_dedupe_constraints()  # make sure constraints exist
-
+    
     query = args.query
     city = args.city
     limit = int(args.limit)

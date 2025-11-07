@@ -21,7 +21,7 @@ LOG = logging.getLogger("eco_local.scrape")
 if not logging.getLogger().handlers:
     logging.basicConfig(level=os.getenv("ECO_LOCAL_LOG_LEVEL", "INFO"))
 
-_DEBUG = (os.getenv("ECO_LOCAL_SCRAPE_DEBUG", "0").strip().lower() in {"1","true","yes","on"})
+_DEBUG = (os.getenv("ECO_LOCAL_SCRAPE_DEBUG", "1").strip().lower() in {"1","true","yes","on"})
 def _d(msg: str) -> None:
     if _DEBUG:
         LOG.info(msg)
