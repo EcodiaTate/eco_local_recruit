@@ -56,11 +56,13 @@ _ECOVOICE_CONTEXT = {
         "Never use corporate clichés: 'reach out', 'touch base', 'circle back', 'synergy', 'leverage', 'value proposition'.",
         "No sequence/automation vibes. This is a personal invite from locals.",
         "Avoid excessive exclamation marks and emojis. No em dashes.",
+        "Speak as if you have known the recipient for a long time, you are friends, they are special to you, you are familiar."
     ],
   
     "copy_dont": [
         "Hard sells, urgency, scarcity, faux deadlines.",
         "Multi-CTA lists. Keep it to one link and a reply path.",
+        "Do not be OVER-enthausiastic, don't use salesy/advertisement/pitch language, you are a friend, not a salesperson."
     ],
     "subject_style": [
         "Avoid 'Final', 'Last chance', 'Free', 'Act now'.",
