@@ -1,3 +1,4 @@
+# recruiting/outreach.py
 from __future__ import annotations
 from typing import Dict, Any, Tuple, List, Optional
 import json
@@ -10,14 +11,14 @@ from .tools import (
     thread_context,
     calendar_suggest_windows,   # scored non-binding windows
 )
+from .branding import header_logo_src_email  # <- email-safe (https/data) logo src
 
 SENDER_NAME = os.getenv("ECO_LOCAL_SENDER_NAME", "Ecodia")
 SENDER_TITLE = os.getenv("ECO_LOCAL_SENDER_TITLE", "Ecodia")
 SENDER_PHONE = os.getenv("ECO_LOCAL_SENDER_PHONE", "")
-SENDER_LOGO = os.getenv(
-    "ECO_LOCAL_LOGO_URL",
-    "https://elocal.ecodia.au/static/brand/ecolocal-logo-transparent.png"
-)
+
+# Always resolve the logo through branding (handles ECO_LOCAL_LOGO_URL and fallback URL)
+LOGO_SRC = header_logo_src_email()
 
 MAX_ATTEMPTS = int(os.getenv("ECO_LOCAL_MAX_ATTEMPTS", "3"))
 
@@ -217,13 +218,14 @@ def _render_times_block(slots: List[Dict[str, Any]]) -> str:
 
 def _signature() -> str:
     # Include both a comment marker and a data attribute for robust detection.
+    # Use LOGO_SRC resolved via branding (always https/data).
     return f"""
 <!--ECOL_SIGNATURE_START-->
 <div data-ecol-signature="1">
 <table cellpadding="0" cellspacing="0" role="presentation" style="margin-top:16px;">
   <tr>
     <td style="padding-right:12px; vertical-align:top;">
-      <img src="{SENDER_LOGO}" alt="ECO Local logo"
+      <img src="{LOGO_SRC}" alt="ECO Local logo"
            width="110" style="display:block; border:0;">
     </td>
     <td style="vertical-align:top;">

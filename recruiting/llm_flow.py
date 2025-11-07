@@ -28,6 +28,7 @@ from .calendar_client import (
     build_ics,
     ICSSpec,
 )
+from .branding import header_logo_src_email  # <- email-safe https/data logo
 
 log = logging.getLogger(__name__)
 if not logging.getLogger().handlers:
@@ -188,9 +189,8 @@ def _tool_catalog() -> List[ToolSpec]:
         ),
     ]
 
-
 # ──────────────────────────────────────────────────────────────────────────────
-# Utilities
+# Utilities (time, semantics)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _now_plus_7_days(tz: ZoneInfo) -> Dict[str, Any]:
@@ -497,6 +497,79 @@ def _prompt_coordinator_action(
     return {"system": system, "user": user}
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Email polishing (signature + optional time suggestions)
+# ──────────────────────────────────────────────────────────────────────────────
+
+_LOGO_SRC = header_logo_src_email()  # email-safe https/data
+
+def _render_times_block(slots: List[CandidateSlot]) -> str:
+    if not slots:
+        return ""
+    def _label(s_iso: str, e_iso: str) -> str:
+        try:
+            s = datetime.fromisoformat(s_iso.replace("Z", "+00:00"))
+            e = datetime.fromisoformat(e_iso.replace("Z", "+00:00"))
+            h = lambda dt: (f"{(dt.hour % 12) or 12}:{dt.minute:02d}" if dt.minute else f"{(dt.hour % 12) or 12}") + ("am" if dt.hour < 12 else "pm")
+            day = f"{s.strftime('%a')} {s.day} {s.strftime('%b')}"
+            return f"{day}, {h(s)}–{h(e)}"
+        except Exception:
+            return f"{s_iso} – {e_iso}"
+    items = "".join(f"<li>{_label(s.start, s.end)}</li>" for s in slots[:3])
+    return (
+        '<div data-ecolocal-slots="1" style="margin:16px 0 8px; font-family:Arial,Helvetica,sans-serif;">'
+        '<div style="font-weight:600; margin-bottom:6px;">A few times that could work:</div>'
+        f"<ul>{items}</ul>"
+        "</div>"
+    )
+
+def _signature_block() -> str:
+    # marker + data attribute for reliable de-dup and insertion
+    return f"""
+<!--ECOL_SIGNATURE_START-->
+<div data-ecol-signature="1">
+  <table cellpadding="0" cellspacing="0" role="presentation" style="margin-top:16px;">
+    <tr>
+      <td style="padding-right:12px; vertical-align:top;">
+        <img src="{_LOGO_SRC}" alt="ECO Local logo" width="110" style="display:block; border:0;">
+      </td>
+      <td style="vertical-align:top;">
+        <div style="font-family:'Arial Narrow','Roboto Condensed',Arial,sans-serif; font-size:13px; line-height:1.4;">
+          <div style="color:#396041; font-weight:600;">Proof, not offsets, building local value.</div>
+          <div style="color:#000; margin-top:2px;">An Ecodia Launchpad project</div>
+          <div style="margin-top:4px;">
+            <a href="https://ecodia.au/eco-local" style="color:#7fd069; text-decoration:none;">ecodia.au/eco-local</a><br>
+            <a href="mailto:ecolocal@ecodia.au" style="color:#7fd069; text-decoration:none;">ecolocal@ecodia.au</a>
+          </div>
+          <div style="margin-top:8px; color:#777;">
+            Ecodia helps communities, youth, and partners collaborate and build regenerative futures together.
+            <br>We sometimes make mistakes — let us know at connect@ecodia.au</br>
+          </div>
+        </div>
+      </td>
+    </tr>
+  </table>
+</div>
+""".strip()
+
+def _polish_email_html(html: str, slots: List[CandidateSlot]) -> str:
+    """
+    - Ensure a branded signature with https/data logo is present.
+    - If not already present, insert up to 3 varied time options *above* the signature marker.
+    - Avoid duplicating either section.
+    """
+    out = (html or "")
+    has_sig = ('data-ecol-signature="1"' in out) or ("<!--ECOL_SIGNATURE_START-->" in out)
+    if not has_sig:
+        out = out.rstrip() + "\n" + _signature_block()
+
+    if 'data-ecolocal-slots="1"' not in out:
+        times_html = _render_times_block(slots)
+        if times_html:
+            out = out.replace("<!--ECOL_SIGNATURE_START-->", times_html + "\n<!--ECOL_SIGNATURE_START-->")
+
+    return out
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Tool executor
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -695,12 +768,17 @@ def run_llm_flow(
         internal_notes=b_raw.get("internal_notes"),
     )
     d_raw = final_action_raw.get("draft_result", {})
+    # polish the LLM html with signature + optional “times” block
+    polished_html = _polish_email_html(
+        d_raw.get("html", "<p>Thanks for your note — here’s a quick summary below.</p>"),
+        all_available_slots
+    )
     draft = DraftResult(
         subject=d_raw.get("subject", f"Re: {email.subject}"),
-        html=d_raw.get("html", "<p>Thanks for your note — here’s a quick summary below.</p>"),
+        html=polished_html,
     )
 
-    # Execute
+    # Execute (optional writes)
     created_ics: Optional[Tuple[str, bytes]] = None
     if allow_calendar_writes and booking.action in ("hold", "event") and booking.chosen_slot:
         try:
