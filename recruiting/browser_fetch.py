@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import re
+import sys, atexit
+import asyncio
+import socket
 from typing import List, Set, Deque, Optional, Tuple
 from urllib.parse import urlparse, urljoin
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 
 # -------------------- Regexes / Hints --------------------
 
@@ -30,16 +34,43 @@ _JS_STR_JOIN_EMAIL = re.compile(
 
 _BAD_DOMAINS = {
     # theme/demo placeholders
-    "enfold-restaurant.com", "example.com", "example.org", "example.net",
+    "enfold-restaurant.com",
+    "example.com",
+    "example.org",
+    "example.net",
     # policy vendors / analytics junk patterns can creep in
-    "privacypolicy", "termsfeed", "cookiebot", "iubenda",
+    "privacypolicy",
+    "termsfeed",
+    "cookiebot",
+    "iubenda",
 }
 
 _ALLOWED_TLDS = (
-    ".com", ".com.au", ".org", ".org.au", ".net", ".net.au", ".edu.au", ".gov.au", ".co", ".io"
+    ".com",
+    ".com.au",
+    ".org",
+    ".org.au",
+    ".net",
+    ".net.au",
+    ".edu.au",
+    ".gov.au",
+    ".co",
+    ".io",
 )
 
-_GENERIC_INBOX_PREFIXES = ("hello@", "contact@", "info@", "enquiries@", "admin@", "team@", "office@", "support@", "sales@", "booking@", "reservations@")
+_GENERIC_INBOX_PREFIXES = (
+    "hello@",
+    "contact@",
+    "info@",
+    "enquiries@",
+    "admin@",
+    "team@",
+    "office@",
+    "support@",
+    "sales@",
+    "booking@",
+    "reservations@",
+)
 
 _OBFUSCATE_PATTERNS = [
     # common obfuscations -> convert to literal email text before finding
@@ -49,6 +80,7 @@ _OBFUSCATE_PATTERNS = [
     (re.compile(r"\s*\[?\(?\s*(?:dot|\.)\s*\)?\]?\s*", re.I), "."),
 ]
 
+
 def _deobfuscate_text(txt: str) -> str:
     s = txt or ""
     for pat, repl in _OBFUSCATE_PATTERNS:
@@ -57,6 +89,7 @@ def _deobfuscate_text(txt: str) -> str:
     s = re.sub(r"\s*@\s*", "@", s)
     s = re.sub(r"\s*\.\s*", ".", s)
     return s
+
 
 def _domain_ok(email: str) -> bool:
     if "@" not in email:
@@ -70,19 +103,20 @@ def _domain_ok(email: str) -> bool:
         return False
     return True
 
+
 def _order_and_filter_emails(emails: list[str], prefer_domain: str | None = None) -> list[str]:
     # de-dupe (case-insensitive) + filter
     seen, out = set(), []
     prefer_domain = (prefer_domain or "").lower().lstrip("www.")
+
     # sort by: exact-domain > generic inbox > others
     def score(e: str) -> tuple[int, int]:
         el = e.lower()
-        exact = 0
-        if prefer_domain and el.endswith("@" + prefer_domain):
-            exact = 1
+        exact = 1 if (prefer_domain and el.endswith("@" + prefer_domain)) else 0
         generic = 1 if any(el.startswith(g) for g in _GENERIC_INBOX_PREFIXES) else 0
-        # higher tuple sorts later, so invert
+        # sort descending by (exact, generic)
         return (-exact, -generic)
+
     cleaned = []
     for e in emails:
         e = e.strip()
@@ -97,16 +131,19 @@ def _order_and_filter_emails(emails: list[str], prefer_domain: str | None = None
     cleaned.sort(key=score)
     return cleaned
 
+
 def _norm_host(u: str) -> str:
     p = urlparse(u)
     host = (p.netloc or "").lower()
     return host[4:] if host.startswith("www.") else host
+
 
 def _same_origin(u: str, base: str) -> bool:
     hu, hb = _norm_host(u), _norm_host(base)
     if not hu or not hb:
         return False
     return hu == hb
+
 
 def _seed_urls(domain_or_url: str) -> List[str]:
     parsed = urlparse(domain_or_url)
@@ -117,8 +154,10 @@ def _seed_urls(domain_or_url: str) -> List[str]:
     out, seen = [], set()
     for s in seeds:
         if s not in seen:
-            seen.add(s); out.append(s)
+            seen.add(s)
+            out.append(s)
     return out
+
 
 def _require_playwright():
     try:
@@ -132,7 +171,9 @@ def _require_playwright():
             f"Underlying error: {e}"
         )
 
+
 # -------------------- Page extraction helpers (run inside browser) --------------------
+
 
 def _emails_from_cloudflare(page) -> List[str]:
     """Decode Cloudflare __cf_email__ obfuscation."""
@@ -162,6 +203,7 @@ def _emails_from_cloudflare(page) -> List[str]:
         return page.evaluate(js) or []
     except Exception:
         return []
+
 
 def _emails_from_jsonld(page) -> List[str]:
     """Pull emails from schema.org JSON-LD (Organization, LocalBusiness, etc.)."""
@@ -194,6 +236,7 @@ def _emails_from_jsonld(page) -> List[str]:
         return page.evaluate(js) or []
     except Exception:
         return []
+
 
 def _emails_from_attrs_and_forms(page) -> List[str]:
     """
@@ -242,6 +285,7 @@ def _emails_from_attrs_and_forms(page) -> List[str]:
     except Exception:
         return []
 
+
 def _emails_from_js_joins(page) -> List[str]:
     """Detect common 'string'+'join' JS patterns that form emails."""
     try:
@@ -260,6 +304,7 @@ def _emails_from_js_joins(page) -> List[str]:
             continue
     return out
 
+
 def _sanitize_mailtos(mailtos: List[str]) -> List[str]:
     out = []
     for m in mailtos or []:
@@ -274,6 +319,7 @@ def _sanitize_mailtos(mailtos: List[str]) -> List[str]:
             out.append(m)
     return out
 
+
 def _collect_internal_links(page, url: str) -> List[str]:
     try:
         hrefs = page.eval_on_selector_all("a[href]", "els => els.map(a => a.getAttribute('href') || '')") or []
@@ -287,7 +333,8 @@ def _collect_internal_links(page, url: str) -> List[str]:
             if not _same_origin(absu, url):
                 continue
             if absu and absu not in seen_local:
-                seen_local.add(absu); links.append(absu)
+                seen_local.add(absu)
+                links.append(absu)
         except Exception:
             continue
     # contact-ish first
@@ -295,20 +342,25 @@ def _collect_internal_links(page, url: str) -> List[str]:
     others = [u for u in links if u not in contactish]
     return contactish + others
 
+
 def _jump_to_common_anchors(page) -> None:
     # try to hit likely anchors so the DOM renders contact blocks (some frameworks lazy-render)
     anchors = ["#contact", "#get-in-touch", "#about", "#footer", "#find-us"]
     for a in anchors:
         try:
-            page.evaluate(f"""
+            page.evaluate(
+                f"""
               (sel) => {{
                 const el = document.querySelector(sel);
                 if (el && el.scrollIntoView) el.scrollIntoView({{behavior:'instant', block:'center'}});
               }}
-            """, a)
+            """,
+                a,
+            )
             page.wait_for_timeout(80)
         except Exception:
             pass
+
 
 def _expand_common_ui(page) -> None:
     """
@@ -338,6 +390,7 @@ def _expand_common_ui(page) -> None:
     except Exception:
         pass
 
+
 def _scroll_and_wait(page, timeout_ms: int) -> None:
     page.wait_for_load_state("domcontentloaded", timeout=timeout_ms)
     try:
@@ -355,6 +408,7 @@ def _scroll_and_wait(page, timeout_ms: int) -> None:
     _expand_common_ui(page)
     # minor extra idle
     page.wait_for_timeout(120)
+
 
 def _harvest_on_page(page, url: str) -> Tuple[List[str], List[str]]:
     """Return (emails, internal_links) found on the current page."""
@@ -382,15 +436,17 @@ def _harvest_on_page(page, url: str) -> Tuple[List[str], List[str]]:
     emails |= set(_emails_from_jsonld(page))
     emails |= set(_emails_from_attrs_and_forms(page))
     emails |= set(_emails_from_js_joins(page))
-    # after you computed `emails` + have `text` and `html`
+
+    # deobfuscation pass
     try:
         deob = _deobfuscate_text(text or "")
         emails |= set(_EMAIL_RE_TEXT.findall(deob or ""))
     except Exception:
         pass
 
-    # final ordering/filter
-    emails = set(_order_and_filter_emails(list(emails)))
+    # final ordering/filter (prefer same-domain inboxes)
+    host = _norm_host(url)
+    emails = set(_order_and_filter_emails(list(emails), prefer_domain=host))
 
     # same-origin iframes (light touch)
     try:
@@ -422,52 +478,73 @@ def _harvest_on_page(page, url: str) -> Tuple[List[str], List[str]]:
 
     return (list(emails), links)
 
-# -------------------- Public entrypoint --------------------
 
-def fetch_emails_with_browser(
+# -------------------- Sync crawl core (used by thread/offload) --------------------
+
+
+def _fetch_emails_with_browser_sync(
     domain_or_url: str,
     *,
-    max_pages: int = 16,
-    timeout_ms: int = 18000,
+    max_pages: int,
+    timeout_ms: int,
 ) -> List[str]:
     """
-    Headless Playwright crawl (sync) of same-origin pages:
-      - picks the first loadable seed (http/https, www/non-www)
-      - navigates to contact-like links first
-      - expands accordions/tabs; scrolls; visits same-origin iframes
-      - extracts emails from mailto, visible text/HTML, CF, JSON-LD, attrs, JS joins
-    Returns a de-duplicated list of emails found.
+    Pure SYNC implementation. Safe to run in a background thread.
     """
-    _ = timeout_ms  # used in timeouts below
+    # Ensure Windows can spawn subprocesses for Playwright
+    _ensure_win_proactor()
+
     sync_playwright = _require_playwright()
+
+    # DNS sanity: skip obviously invalid hosts quickly
+    try:
+        host = (_norm_host(domain_or_url) or domain_or_url).strip()
+        host = host.split("/", 1)[0]
+        if host:
+            socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+    except Exception:
+        return []
+
     seeds = _seed_urls(domain_or_url)
     visited: Set[str] = set()
     queue: Deque[str] = deque()
     emails: List[str] = []
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
+        # Add container-safe flags for Cloud Run
+        browser = pw.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
         context = browser.new_context(
             java_script_enabled=True,
             ignore_https_errors=True,
             viewport={"width": 1360, "height": 1800},
-            user_agent="EcodiaEcoLocal/browser (https://ecodia.au)"
+            user_agent="EcodiaEcoLocal/browser (https://ecodia.au)",
         )
 
         # Trim heavy / noisy resources
         def _route_handler(route):
             req = route.request
-            rt = (req.resource_type or "").lower()
-            url = (req.url or "").lower()
+            rt = (getattr(req, "resource_type", None) or "").lower()
+            url = (getattr(req, "url", None) or "").lower()
             if rt in ("image", "media", "font"):
                 return route.abort()
-            # skip common analytics/ad domains
-            if any(b in url for b in (
-                "google-analytics.com", "googletagmanager.com", "doubleclick.net",
-                "facebook.net", "hotjar", "segment.com", "sentry.io",
-            )):
+            if any(
+                b in url
+                for b in (
+                    "google-analytics.com",
+                    "googletagmanager.com",
+                    "doubleclick.net",
+                    "facebook.net",
+                    "hotjar",
+                    "segment.com",
+                    "sentry.io",
+                )
+            ):
                 return route.abort()
             return route.continue_()
+
         context.route("**/*", _route_handler)
 
         page = context.new_page()
@@ -520,7 +597,9 @@ def fetch_emails_with_browser(
 
                 # enqueue next links within budget & origin
                 for nxt in links:
-                    if nxt not in visited and _same_origin(nxt, start_url) and (len(visited) + len(queue) < max_pages):
+                    if nxt not in visited and _same_origin(nxt, start_url) and (
+                        len(visited) + len(queue) < max_pages
+                    ):
                         queue.append(nxt)
         finally:
             try:
@@ -545,4 +624,91 @@ def fetch_emails_with_browser(
             ordered.append(e)
     return ordered
 
-#touch
+
+# -------------------- Thread offload helpers --------------------
+
+
+def _ensure_win_proactor() -> None:
+    if sys.platform.startswith("win"):
+        try:
+            if not isinstance(asyncio.get_event_loop_policy(), asyncio.WindowsProactorEventLoopPolicy):
+                asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+        except Exception:
+            pass
+
+
+# --- keep your existing executor ---
+_executor: ThreadPoolExecutor | None = None
+
+
+@atexit.register
+def _shutdown_executor() -> None:
+    global _executor
+    try:
+        if _executor:
+            _executor.shutdown(wait=False, cancel_futures=True)
+    except Exception:
+        pass
+
+
+def _in_asyncio() -> bool:
+    try:
+        asyncio.get_running_loop()
+        return True
+    except RuntimeError:
+        return False
+
+
+def _run_in_thread(fn, *args, **kwargs):
+    global _executor
+    if _executor is None:
+        _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="browser-fetch")
+    fut = _executor.submit(fn, *args, **kwargs)
+    return fut.result()
+
+
+# -------------------- Public entrypoint --------------------
+
+
+def fetch_emails_with_browser(
+    domain_or_url: str,
+    *,
+    max_pages: int = 16,
+    timeout_ms: int = 18000,
+) -> List[str]:
+    """
+    Headless Playwright crawl (sync) of same-origin pages:
+      - picks the first loadable seed (http/https, www/non-www)
+      - navigates to contact-like links first
+      - expands accordions/tabs; scrolls; visits same-origin iframes
+      - extracts emails from mailto, visible text/HTML, CF, JSON-LD, attrs, JS joins
+    Returns a de-duplicated list of emails found.
+
+    IMPORTANT: If called under an active asyncio loop (e.g., FastAPI request),
+    we offload the sync Playwright run into a worker thread to avoid:
+      "It looks like you are using Playwright Sync API inside the asyncio loop."
+    """
+    # Quick DNS sanity (fast path for junk hosts)
+    try:
+        host = (_norm_host(domain_or_url) or domain_or_url).strip()
+        host = host.split("/", 1)[0]
+        if host:
+            socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+    except Exception:
+        return []
+
+    if _in_asyncio():
+        return _run_in_thread(
+            _fetch_emails_with_browser_sync,
+            domain_or_url,
+            max_pages=max_pages,
+            timeout_ms=timeout_ms,
+        )
+    else:
+        # Ensure Windows policy locally; safe no-op on Linux/Cloud Run
+        _ensure_win_proactor()
+        return _fetch_emails_with_browser_sync(
+            domain_or_url,
+            max_pages=max_pages,
+            timeout_ms=timeout_ms,
+        )

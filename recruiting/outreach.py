@@ -30,7 +30,8 @@ GOAL = (
     "It's not a hard sell. It's a 'hey, we love what you're doing, we've got this thing we're building with local youth, and it feels like you'd be a perfect fit.' "
     "Make them feel *seen* and *invited*, not 'marketed to'. The vibe is community-building. "
     "They can sign up directly if they're keen (https://ecodia.au/join) or just learn more (https://ecodia.au/eco-local). "
-    "Or, even better, just reply to this email to chat. The core ask is simple: 'Want to join us?'"
+    "Or, even better, just shoot me a reply. The core ask is simple: 'Youth want you!'"
+    "All calls/meetings will be with our (Ecodia's) founder, Tate"
 )
 
 # ── Brand voice pack ──────────────────────────────────────────────────────────
@@ -50,14 +51,12 @@ _ECOVOICE_CONTEXT = {
         "Never use corporate clichés: 'reach out', 'touch base', 'circle back', 'synergy', 'leverage', 'value proposition'.",
         "No sequence/automation vibes. This is a personal invite from locals.",
         "Avoid excessive exclamation marks and emojis. **No em dashes.**",
-        # CHANGE this line (this is more appropriate for a first touch than "you are friends"):
         "Speak *about* them like you're a fan of their business (even if you don't know them personally). You're inviting them because you genuinely think they're a great fit, not just because they're on a list.",
     ],
  
     "copy_dont": [
         "Hard sells, urgency, scarcity, faux deadlines.",
         "Multi-CTA lists. Keep it to one link and a reply path.",
-        # CHANGE this line to be more explicit:
         "No 'marketing speak'. Don't list features (like '10-minute setup' or 'zero-risk pricing'). Instead, talk about the *feeling* and the *mission* (like 'building real local connections' or 'helping youth find places they love').",
     ],
 
