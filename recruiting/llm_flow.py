@@ -9,13 +9,13 @@ from typing import Any, Dict, List, Optional, Callable, Tuple
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from email.utils import parseaddr
-from .branding import header_logo_src_email  # add this import at top
 
 try:
     import httpx  # prefer httpx if available
 except Exception:  # pragma: no cover
     httpx = None
 
+from .branding import header_logo_src_email  # <- email-safe https/data logo
 from .llm_client import generate_json as _gen_json
 from .tools import thread_context, semantic_topk_for_thread
 from .calendar_client import (
@@ -29,7 +29,6 @@ from .calendar_client import (
     build_ics,
     ICSSpec,
 )
-from .branding import header_logo_src_email  # <- email-safe https/data logo
 
 log = logging.getLogger(__name__)
 if not logging.getLogger().handlers:
@@ -524,7 +523,6 @@ def _render_times_block(slots: List[CandidateSlot]) -> str:
     )
 
 def _signature_block() -> str:
-    logo = header_logo_src_email()
     # marker + data attribute for reliable de-dup and insertion
     return f"""
 <!--ECOL_SIGNATURE_START-->
@@ -532,7 +530,7 @@ def _signature_block() -> str:
   <table cellpadding="0" cellspacing="0" role="presentation" style="margin-top:16px;">
     <tr>
       <td style="padding-right:12px; vertical-align:top;">
-      <img src="{logo}" alt="ECO Local logo" width="110" style="display:block; border:0;">
+        <img src="{_LOGO_SRC}" alt="ECO Local logo" width="110" style="display:block; border:0;">
       </td>
       <td style="vertical-align:top;">
         <div style="font-family:'Arial Narrow','Roboto Condensed',Arial,sans-serif; font-size:13px; line-height:1.4;">
@@ -542,7 +540,7 @@ def _signature_block() -> str:
             <a href="https://ecodia.au/eco-local" style="color:#7fd069; text-decoration:none;">ecodia.au/eco-local</a><br>
             <a href="mailto:ecolocal@ecodia.au" style="color:#7fd069; text-decoration:none;">ecolocal@ecodia.au</a>
           </div>
-          <div style="margin-top:8px; color:#777;">
+          <div style="margin-top:8px; color:#777%;">
             Ecodia helps communities, youth, and partners collaborate and build regenerative futures together.
             <br>We sometimes make mistakes — let us know at connect@ecodia.au</br>
           </div>

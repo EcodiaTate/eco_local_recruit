@@ -15,34 +15,13 @@ from .store import (
     iter_run_items,
     mark_sent,
 )
-from .outreach import draft_first_touch, draft_followup
+from .outreach import draft_first_touch
 from .sender import send_email
 
 @dataclass
 class BuildResult:
     created: bool
     counts: Dict[str, int]
-
-def build_runsheet_for_date(target: date) -> BuildResult:
-    quota = get_first_touch_quota()
-    followup_days = get_followup_days()
-
-    run = create_run(target)
-
-    ft_prospects = select_prospects_for_first_touch(quota)
-    for p in ft_prospects:
-        subj, body = draft_first_touch(p)
-        attach_draft_email(run, p, "first", subj, body)
-
-    due = select_prospects_for_followups(target, followup_days)
-    for p in due:
-        attempt = max(1, min(int(p.get("attempt_count", 1)), 2))
-        subj, body = draft_followup(p, attempt)
-        attach_draft_email(run, p, "followup1" if attempt == 1 else "final", subj, body)
-
-    freeze_run(run)
-    created = bool(ft_prospects or due)
-    return BuildResult(created, {"first": len(ft_prospects), "followups": len(due)})
 
 def send_runsheet_for_date(target: date) -> Dict[str, int]:
     sent_counts: Dict[str, int] = {"first": 0, "followups": 0, "final": 0}

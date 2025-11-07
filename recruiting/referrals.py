@@ -1,3 +1,4 @@
+# recruiting/referrals_jobs.py
 from __future__ import annotations
 
 import os
@@ -24,14 +25,12 @@ if not logging.getLogger().handlers:
 # ──────────────────────────────────────────────────────────────────────────────
 # Config / constants
 # ──────────────────────────────────────────────────────────────────────────────
-
 BRIS_TZ = os.getenv("ECO_TZ", "Australia/Brisbane")
 REFERRAL_BONUS_ECO = int(os.getenv("ECO_LOCAL_REFERRAL_BONUS", "50"))
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Data model
 # ──────────────────────────────────────────────────────────────────────────────
-
 @dataclass
 class YouthReferral:
     id: str
@@ -61,7 +60,6 @@ def _to_referral(d: Dict[str, Any]) -> YouthReferral:
 # ──────────────────────────────────────────────────────────────────────────────
 # Logo helpers (URL default, CID optional)
 # ──────────────────────────────────────────────────────────────────────────────
-
 def _app_root() -> Path:
     try:
         return Path(__file__).resolve().parents[1]
@@ -71,19 +69,12 @@ def _app_root() -> Path:
 _CID_SIG = re.compile(r'src=["\']cid:ecolocal-logo["\']', re.I)
 
 def _normalize_signature_logo(html: str, *, is_inline_cid: bool) -> str:
-    """
-    If we're not attaching inline images, rewrite the signature's CID logo to a public HTTPS URL.
-    """
     if is_inline_cid:
         return html
     url = header_logo_src_email()
     return _CID_SIG.sub(f'src="{url}"', html)
 
 def _load_logo_bytes() -> Optional[bytes]:
-    """
-    Load logo bytes from static for CID mode.
-    Looks under eco_local/static/brand/ecolocal-logo-transparent.png
-    """
     p = _app_root() / "static" / "brand" / "ecolocal-logo-transparent.png"
     try:
         return p.read_bytes() if p.is_file() else None
@@ -102,55 +93,23 @@ def _pick_logo_mode() -> str:
     return "url"
 
 def _logo_src_for_email() -> Tuple[str, Optional[List[Dict[str, bytes | str]]]]:
-    """
-    Returns (img_src, inline_images). If cid mode and bytes available, we return
-    ("cid:ecolocal-logo", [{"cid":"ecolocal-logo","bytes":...}]); otherwise URL mode.
-    """
     mode = _pick_logo_mode()
     if mode == "cid":
         b = _load_logo_bytes()
         if b:
             return "cid:ecolocal-logo", [{"cid": "ecolocal-logo", "bytes": b}]
-        # fallback to URL if bytes missing
     if mode == "none":
         return "", None
-    # url (email-safe https or data:) via branding
     return header_logo_src_email(), None
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Constraints / CRUD
+# Constraints / CRUD (used by jobs and partner webhook)
 # ──────────────────────────────────────────────────────────────────────────────
-
 def create_constraints() -> None:
     _run("""
     CREATE CONSTRAINT referral_id IF NOT EXISTS
       FOR (r:YouthReferral) REQUIRE r.id IS UNIQUE;
     """)
-
-def insert_referral(y: YouthReferral) -> YouthReferral:
-    recs = _run("""
-    MERGE (u:User {id: $youth_id})
-    ON CREATE SET u.name = $youth_name
-    WITH u
-    CREATE (r:YouthReferral {
-      id: randomUUID(),
-      submitted_at: datetime($submitted_at),
-      youth_id: $youth_id,
-      youth_name: $youth_name,
-      store_name: $store_name,
-      location: $location,
-      notes: $notes,
-      website: $website,
-      email: $email,
-      phone: $phone,
-      place_id: $place_id,
-      status: $status
-    })
-    MERGE (u)-[:REFERRED]->(r)
-    RETURN r {.*, id: r.id } AS r
-    """, {**asdict(y), "submitted_at": y.submitted_at.isoformat()})
-    rec = recs[0]["r"]
-    return _to_referral(rec)
 
 def get_referral(ref_id: str) -> Optional[YouthReferral]:
     recs = _run("""MATCH (r:YouthReferral {id: $id}) RETURN r {.*} AS r""", {"id": ref_id})
@@ -210,7 +169,6 @@ def mark_joined_and_reward(ref_id: str, partner_id: str, bonus_eco: int) -> None
 # ──────────────────────────────────────────────────────────────────────────────
 # Enrichment via Google CSE & Places
 # ──────────────────────────────────────────────────────────────────────────────
-
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GOOGLE_PSE_KEY") or ""
 GOOGLE_CSE_ID  = os.getenv("GOOGLE_CSE_ID") or os.getenv("GOOGLE_PSE_CX") or ""
 GOOGLE_PLACES_KEY = os.getenv("GOOGLE_PLACES_KEY") or GOOGLE_API_KEY
@@ -276,9 +234,8 @@ async def enrich_pending(limit: int = 100) -> List[YouthReferral]:
     return out
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Nicer, outreach-style referral email
+# Outreach email
 # ──────────────────────────────────────────────────────────────────────────────
-
 def _brand_wrap(inner_html: str) -> Tuple[str, Optional[List[Dict[str, bytes | str]]]]:
     logo_src, inline = _logo_src_for_email()
     logo_img = (f'<img src="{logo_src}" alt="ECO Local" style="height:36px;display:block;">') if logo_src else ""
@@ -382,7 +339,7 @@ def _gather_youth_names_for(business_name: str, location: str) -> List[str]:
     return names[:12]
 
 def _best_to_email(website: Optional[str]) -> Optional[str]:
-    # Hook for your website→email heuristic if you enable it later.
+    # Hook for website→email heuristic if enabled later.
     return None
 
 def _send_referral_outreach(r: YouthReferral) -> None:
@@ -404,7 +361,6 @@ def _send_referral_outreach(r: YouthReferral) -> None:
         log.warning("[referrals] no recipient for id=%s store=%s loc=%s", r.id, r.store_name, r.location)
         return
 
-    # One send: raw path if inline_images else simple path
     mid = send_email(
         to=to_email,
         subject=subject,
@@ -419,9 +375,8 @@ def _send_referral_outreach(r: YouthReferral) -> None:
     mark_outreach_sent(r.id)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Batch jobs
+# Batch jobs / webhooks (called by your jobs router)
 # ──────────────────────────────────────────────────────────────────────────────
-
 def month_bounds(d: date, tz: str = BRIS_TZ) -> Tuple[date, date]:
     start = d.replace(day=1)
     if start.month == 12:
@@ -456,21 +411,3 @@ def mark_partner_joined(referral_id: str, partner_id: str, bonus_eco: Optional[i
     bonus = REFERRAL_BONUS_ECO if bonus_eco is None else bonus_eco
     mark_joined_and_reward(referral_id, partner_id, bonus)
     return {"ok": True, "referral_id": referral_id, "partner_id": partner_id, "bonus_eco": bonus}
-
-def submit_referral(youth_id: str, youth_name: str, store_name: str, location: str, notes: Optional[str] = None) -> YouthReferral:
-    y = YouthReferral(
-        id="",
-        submitted_at=datetime.utcnow(),
-        youth_id=youth_id,
-        youth_name=youth_name,
-        store_name=store_name.strip(),
-        location=location.strip(),
-        notes=notes,
-        website=None,
-        email=None,
-        phone=None,
-        place_id=None,
-        status="submitted"
-    )
-    created = insert_referral(y)
-    return created

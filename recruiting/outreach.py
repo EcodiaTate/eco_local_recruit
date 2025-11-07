@@ -23,12 +23,36 @@ LOGO_SRC = header_logo_src_email()
 MAX_ATTEMPTS = int(os.getenv("ECO_LOCAL_MAX_ATTEMPTS", "3"))
 
 GOAL = (
-    "Primary goal: Get business partners excited about and joined up to ECO Local. These prospects can either signup by themselves, "
+    "Primary goal: Get prospective business partners excited about and joined up to ECO Local. These prospects can either signup by themselves, "
     "using the links below, or they can book an in person or phone call meeting if they want to chat first. "
-    "Offer a meeting if they ask/need it or show preference for a chat. A call is also an option and should be booked the same as an in person meeting, "
-    "but with the phone number attached (ask for number if not provided)\n\n"
-    "b) Links: https://ecodia.au/eco-local as the main CTA; but you can also use https://ecodia.au/join if you want."
+    "b) Links: https://ecodia.au/eco-local andyou can also use https://ecodia.au/join for the direct signup link."
 )
+
+# ── Brand voice pack ──────────────────────────────────────────────────────────
+_ECOVOICE_CONTEXT = {
+    "identity": "YOU are Ecodia, rebellious, warm, natural, excitable, youthful.",
+    "ethos": [
+        "Proof, not offsets.",
+        "Local value loops.",
+        "People, planet, youth and future first. People and place over polish.",
+    ],
+    "tone_rules": [
+        "Sound human. Keep it warm, plain, and clear.",
+        "Offer a chat lightly; do not push. Times are optional.",
+        "Never use corporate clichés: 'reach out', 'touch base', 'circle back', 'synergy', 'leverage', 'value proposition'.",
+        "No sequence/automation vibes. This is a personal invite from locals.",
+        "Avoid excessive exclamation marks and emojis. No em dashes.",
+    ],
+  
+    "copy_dont": [
+        "Hard sells, urgency, scarcity, faux deadlines.",
+        "Multi-CTA lists. Keep it to one link and a reply path.",
+    ],
+    "subject_style": [
+        "Avoid 'Final', 'Last chance', 'Free', 'Act now'.",
+        "Feel like a human note, not a campaign.",
+    ],
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Utilities
@@ -292,7 +316,6 @@ def _candidate_slots_for_email(*, trace_id: Optional[str] = None) -> List[Dict[s
 # ─────────────────────────────────────────────────────────────────────────────
 # Drafting
 # ─────────────────────────────────────────────────────────────────────────────
-
 def draft_first_touch(prospect: Dict[str, Any], *, trace_id: Optional[str] = None) -> Tuple[str, str]:
     rq = " ".join(
         x for x in [
@@ -308,21 +331,20 @@ def draft_first_touch(prospect: Dict[str, Any], *, trace_id: Optional[str] = Non
     prompt = {
         "task": "draft_first_outreach_email",
         "goal": GOAL,
+        "brand_voice": _ECOVOICE_CONTEXT,  # ← our vibe, not sales
         "instructions": [
-            "You are Ecodia. You are warm, friendly, passionate, and a little rebellious. You are currently coordinating ECO Local partner outreach.\n",
+            # contract
             "Return a STRICT JSON object with keys: subject (string), html (string).",
-            "You are open, natural, casual, and subtle in accomplishing your goal but do not be over the top, overly enthusiastic or disingenuous.",
-            "Do not use corporate jargon or cold business speak, you are conversing with a human and should make them feel important and valued.",
-            "Do not use emdashes.",
-            "Times are OPTIONAL. Offer a meeting or ask preference naturally.",
+            "html should be valid inline-styled email HTML. No external CSS.",
+            "We add our header/signature separately.",
         ],
         "prospect": _prospect_projection(prospect),
         "context_docs": docs,
-        "candidate_windows": slots,
+        "candidate_windows": slots,                  # optional; writer may ignore
         "time_context": _time_context(),
         "brand": {
             "name": "Ecodia",
-            "positioning": "Mutually benefiting youth and local businesses for a better future."
+            "positioning": "Proof, not offsets - youth and local businesses building value together. Creating a future that is RIGHTFULLY OURS."
         },
         "sender": {
             "name": SENDER_NAME,
@@ -336,61 +358,13 @@ def draft_first_touch(prospect: Dict[str, Any], *, trace_id: Optional[str] = Non
         },
         "policy": {"confirmations": "do-not-confirm-meetings", "tone": "warm-local-plain"},
         "trace_id": trace_id,
+        "banned_subject_words": ["Final", "Fwd", "Re:", "Free", "Act now", "Last chance"],
     }
+
     raw = generate_json(json.dumps(prompt, default=_json_default))
     subj, html = _coerce_subject_html(
         raw,
-        (f"Let’s connect, {prospect.get('name')}" if prospect.get("name") else "Ecodia × ECO Local")
+        (f"Let’s connect, {prospect.get('name')}" if prospect.get("name") else "ECO Local — a simple invite")
     )
     subj = _subject_guard(subj, attempt=1, max_attempts=MAX_ATTEMPTS)
-    return subj, _polish(html, slots)
-
-def draft_followup(prospect: Dict[str, Any], attempt: int, *, trace_id: Optional[str] = None) -> Tuple[str, str]:
-    rq = " ".join(
-        x for x in [
-            (prospect.get("name") or prospect.get("business_name") or ""),
-            prospect.get("domain"),
-            prospect.get("category"),
-            "ECO local value loops Ecodia",
-        ] if x
-    )
-    docs = semantic_docs(rq, k=5)
-    thread = thread_context(prospect.get("thread_id", "") or "")
-    slots = _candidate_slots_for_email(trace_id=trace_id)
-
-    tone = (
-        "Friendly, open, natural, ambitious, with conviction. "
-        "You are Ecodia, genuine and upfront, never over-the-top or corporate. "
-        "You’re building a future that is rightfully ours (people, planet, youth, future)."
-    )
-    subject_hint = "Avoid 'final' language on this attempt." if attempt < MAX_ATTEMPTS else "You MAY use 'Final' in the subject."
-
-    prompt = {
-        "task": "draft_followup_email",
-        "goal": GOAL,
-        "attempt": int(attempt),
-        "max_attempts": MAX_ATTEMPTS,
-        "tone_hint": tone,
-        "instructions": [
-            "Return a STRICT JSON object with keys: subject (string), html (string).",
-            subject_hint,
-        ],
-        "prospect": _prospect_projection(prospect),
-        "thread_context": thread,
-        "context_docs": docs,
-        "candidate_windows": slots,
-        "time_context": _time_context(),
-        "brand": {"name": "Ecodia", "positioning": "A platform for youth and local businesses to work together for a better future."},
-        "sender": {"name": SENDER_NAME, "title": SENDER_TITLE, "phone": SENDER_PHONE},
-        "schema_hint": {
-            "type": "object",
-            "properties": {"subject": {"type": "string"}, "html": {"type": "string"}},
-            "required": ["subject", "html"],
-        },
-        "policy": {"confirmations": "do-not-confirm-meetings", "tone": "warm-local-plain"},
-        "trace_id": trace_id,
-    }
-    raw = generate_json(json.dumps(prompt, default=_json_default))
-    subj, html = _coerce_subject_html(raw, "Quick follow-up — Ecodia ECO Local")
-    subj = _subject_guard(subj, attempt=attempt, max_attempts=MAX_ATTEMPTS)
     return subj, _polish(html, slots)
