@@ -85,7 +85,7 @@ def _pick(*vals: Optional[str]) -> str:
     return ""
 
 _BANNED_SUBJECT_FRAGMENTS = [
-    "join", "movement", "sustainable future", "sunshine coast", "limited", "act now",
+    "join", "movement", "sustainable future", "limited", "act now",
     "last chance", "!", "🚀"
 ]
 
@@ -111,6 +111,7 @@ def _prospect_projection(p: Dict[str, Any]) -> Dict[str, Any]:
         "city": p.get("city"),
         "category": p.get("category"),
         "qualification_score": p.get("qualification_score"),
+        "qualification_reason": p.get("qualification_reason"),
         "attempt_count": p.get("attempt_count"),
         "thread_id": p.get("thread_id"),
     }
@@ -385,8 +386,16 @@ def draft_first_touch(prospect: Dict[str, Any], *, trace_id: Optional[str] = Non
             "Return a STRICT JSON object with keys: subject (string), html (string).",
             "html should be valid inline-styled email HTML. No external CSS.",
             "We add our header/signature separately.",
-            "Personalize the *reason* for the email. Use the prospect's 'name' and 'category' to make a genuine-sounding connection.",
-        ],
+            "**How to personalize:**",
+          
+            "1. **Greeting:** Look at the `prospect.name`. If it sounds like a person's first name (e.g., 'Jane'), use it! (e.g., 'Hey Jane,'). "
+            "If it's a long, formal business name (e.g., '...Pty Ltd', '...& Co', '...Services'), **DO NOT use it in the greeting.** It sounds robotic. "
+            "Instead, use a warm, natural greeting like 'Hey there,' or 'Hey folks at [Natural Short Name],'.",
+            
+            "2. **The 'Why':** Use their 'category' and 'name' (the *idea* of their business) to make a *genuine-sounding connection*. "
+            "Don't just repeat their name. Show them *why* a business like theirs is a perfect fit for a movement connecting youth with local, values-driven places. "
+            "Make them feel *seen*."
+                ],
         "prospect": _prospect_projection(prospect),
         "context_docs": docs,
         "candidate_windows": slots,
@@ -415,7 +424,7 @@ def draft_first_touch(prospect: Dict[str, Any], *, trace_id: Optional[str] = Non
         raw = generate_json(json.dumps(prompt, default=_json_default))
         subj, html = _coerce_subject_html(
             raw,
-            (f"Quick hello from ECO Local, {prospect.get('name')}" if prospect.get("name") else "ECO Local — quick hello")
+            (f"Quick hello from ECO Local!")
         )
     except Exception:
         subj, html = ("ECO Local — quick hello", "<p>Hi there, would you be open to a short intro chat?</p>")
