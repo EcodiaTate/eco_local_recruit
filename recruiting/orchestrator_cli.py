@@ -17,12 +17,6 @@ try:
 except Exception:
     pass  # works without python-dotenv
 
-# ---------------- sys.path shim (run-as-script friendliness) ----------------
-import sys as _sys
-_pkg_dir = Path(__file__).resolve().parents[1]   # .../eco-local
-_repo_dir = _pkg_dir.parent                      # .../
-if _pkg_dir.name == "eco-local" and str(_repo_dir) not in _sys.path:
-    _sys.path.insert(0, str(_repo_dir))
 
 # ---------------- local imports ----------------
 from . import store
@@ -39,6 +33,7 @@ from .calendar_client import _tz as _cal_tz  # type: ignore
 from .calendar_client import _build_calendar_service  # type: ignore
 from .config import settings
 from .tools import calendar_suggest_windows  # agentic, scored windows
+from . import store
 
 # ---- robust discovery-module loader (scrape/parse/qualify/profile) ----
 import importlib
@@ -47,6 +42,10 @@ import importlib.util
 HERE = Path(__file__).resolve()
 PKG_DIR = HERE.parent            # /app/recruiting
 APP_ROOT = PKG_DIR.parent        # /app
+
+import sys as _sys
+if str(APP_ROOT) not in _sys.path:
+    _sys.path.insert(0, str(APP_ROOT))
 
 def _import_by_spec(module_name: str, file_path: Path):
     spec = importlib.util.spec_from_file_location(module_name, file_path)
@@ -103,59 +102,37 @@ def _load_discover_modules():
 
 _scrape, _parse, _qualify, _profile = _load_discover_modules()
 
-# ---- robust seed helpers loader (upsert_prospect / qualify_basic) ----
 def _load_seed_helpers():
     """
-    Try several import paths for seed_cli; otherwise proxy to store.* if available.
+    With /app on sys.path and seed_cli.py sitting next to main.py,
+    import it as a top-level module.
+    Falls back to store proxies if not present.
     """
-    # 1) recruiting.seed_cli
     try:
-        from recruiting.seed_cli import upsert_prospect, qualify_basic  # type: ignore
-        return upsert_prospect, qualify_basic
-    except Exception:
-        pass
-    # 2) top-level seed_cli
-    try:
+        # ✅ absolute, top-level import (since /app is on sys.path)
         from seed_cli import upsert_prospect, qualify_basic  # type: ignore
         return upsert_prospect, qualify_basic
     except Exception:
-        pass
-    # 3) eco_local.seed_cli (monorepo style)
-    try:
-        from eco_local.seed_cli import upsert_prospect, qualify_basic  # type: ignore
-        return upsert_prospect, qualify_basic
-    except Exception:
-        pass
-    # 4) direct-by-file (repo_root/seed_cli.py or /app/seed_cli.py)
-    for cand in [APP_ROOT / "seed_cli.py", APP_ROOT.parent / "seed_cli.py"]:
-        if cand.exists():
-            mod = _import_by_spec("seed_cli", cand)
-            up = getattr(mod, "upsert_prospect", None)
-            qb = getattr(mod, "qualify_basic", None)
-            if callable(up) and callable(qb):
-                return up, qb
+        # Fallback: proxy to store helpers if exposed
+        def _store_upsert_proxy(p):
+            for fname in ("upsert_prospect", "create_prospect", "upsert_or_create_prospect"):
+                fn = getattr(store, fname, None)
+                if callable(fn):
+                    return fn(p)
+            raise RuntimeError(
+                "No seed_cli and store lacks upsert helper. Provide seed_cli.upsert_prospect "
+                "or implement store.upsert_prospect/create_prospect."
+            )
 
-    # 5) proxy to store if it exposes similar helpers
-    def _store_upsert_proxy(p):
-        for fname in ("upsert_prospect", "create_prospect", "upsert_or_create_prospect"):
-            fn = getattr(store, fname, None)
-            if callable(fn):
-                return fn(p)
-        raise RuntimeError(
-            "No seed_cli and store lacks upsert helper. Provide seed_cli.upsert_prospect "
-            "or implement store.upsert_prospect/create_prospect."
-        )
+        def _store_qualify_proxy(node_id: str, score: float, reason: str):
+            for fname in ("qualify_basic", "set_prospect_score", "update_prospect_score"):
+                fn = getattr(store, fname, None)
+                if callable(fn):
+                    return fn(node_id, score=score, reason=reason)
+            print("[discover] qualify proxy: no store helper; skipping score update.")
+            return None
 
-    def _store_qualify_proxy(node_id: str, score: float, reason: str):
-        for fname in ("qualify_basic", "set_prospect_score", "update_prospect_score"):
-            fn = getattr(store, fname, None)
-            if callable(fn):
-                return fn(node_id, score=score, reason=reason)
-        # If nothing, act as no-op
-        print("[discover] qualify proxy: no store helper; skipping score update.")
-        return None
-
-    return _store_upsert_proxy, _store_qualify_proxy
+        return _store_upsert_proxy, _store_qualify_proxy
 
 upsert_prospect, qualify_basic = _load_seed_helpers()
 
