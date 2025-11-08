@@ -1,6 +1,5 @@
 from __future__ import annotations
 from typing import List, Dict, Any, Optional, Union, Tuple
-from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor
 import asyncio
 import os
@@ -8,64 +7,96 @@ import re
 from email.utils import parseaddr
 from datetime import datetime, timedelta, timezone
 
-from .store import _run, upsert_prospect_by_email  # re-use Neo4j runner
+from .store import _run, upsert_prospect_by_email  # reuse Neo4j runner
 from .gmail_client import fetch_unseen_since
-# Keep exposing the suggestion helpers you already have elsewhere
 from .calendar_client import find_free_slots, suggest_windows
+from .config import settings  # ← use settings, not bare names
 
 INBOX_ADDR = os.getenv("ECO_LOCAL_INBOX_ADDRESS", "ECOLocal@ecodia.au")
 AUTO_UPSERT_INBOUND = os.getenv("ECO_LOCAL_AUTO_UPSERT_INBOUND", "1").strip().lower() not in {"0", "false", "no"}
 
 # ─────────────────────────────────────────────────────────
-# Optional: Gemini embedding retrieval (best-effort)
+# Minimal, self-contained Gemini embeddings (no EOS imports)
 # ─────────────────────────────────────────────────────────
-def _embed_vec(text: str) -> Optional[list[float]]:
-    try:
-        from core.llm.embeddings_gemini import get_embedding  # optional
-    except Exception:
-        return None
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if loop and loop.is_running():
-        def _runner():
-            return asyncio.run(get_embedding(text))
-        with ThreadPoolExecutor(max_workers=1) as ex:
-            return list(ex.submit(_runner).result())
-    return asyncio.run(get_embedding(text))
 
-@lru_cache(maxsize=256)
-def _embed_cached(text: str) -> Optional[tuple[float, ...]]:
-    v = _embed_vec(text)
-    if not v:
-        return None
-    try:
-        return tuple(float(x) for x in v)
-    except Exception:
-        return None
+_GEMINI_MODEL = (os.getenv("GEMINI_EMBEDDING_MODEL") or "gemini-embedding-001").strip()
+_GEMINI_DIMS = 3072
 
-# ─────────────────────────────────────────────────────────
-# Embeddings (optional)
-# ─────────────────────────────────────────────────────────
-def _embed_vec(text: str) -> Optional[list[float]]:
-    try:
-        from core.llm.embeddings_gemini import get_embedding
-    except Exception:
+# Prefer env override → GOOGLE_API_KEY → GEMINI_API_KEY
+_GEMINI_KEY = (
+    os.getenv("GOOGLE_API_KEY", "").strip()
+    or settings.GOOGLE_API_KEY.strip()
+    or settings.GEMINI_API_KEY.strip()
+)
+
+if os.getenv("ECO_LOCAL_EMBED_DEBUG", "1") == "1":
+    # Do NOT print the key, just whether it exists.
+    print(f"[embeddings] model={_GEMINI_MODEL} dims={_GEMINI_DIMS} key_present={bool(_GEMINI_KEY)}")
+
+def _embed_vec(text: str) -> Optional[List[float]]:
+    if not _GEMINI_KEY or not text or not text.strip():
         return None
     try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if loop and loop.is_running():
-        def _runner():
-            return asyncio.run(get_embedding(text))
-        with ThreadPoolExecutor(max_workers=1) as ex:
-            return list(ex.submit(_runner).result())
-    return asyncio.run(get_embedding(text))
+        import httpx  # preferred if available
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{_GEMINI_MODEL}:embedContent"
+        body = {
+            "model": f"models/{_GEMINI_MODEL}",
+            "content": {"parts": [{"text": text}]},
+            "taskType": "RETRIEVAL_DOCUMENT",
+            "outputDimensionality": _GEMINI_DIMS,
+        }
+        headers = {"Content-Type": "application/json", "x-goog-api-key": _GEMINI_KEY}
+        with httpx.Client(timeout=30.0) as client:
+            r = client.post(url, headers=headers, json=body)
+            if r.status_code != 200:
+                # Optional: quick reason dump (403 often = wrong key/project/billing)
+                try:
+                    print("[embeddings] HTTP", r.status_code, r.text[:200])
+                except Exception:
+                    pass
+                return None
+            data = r.json() or {}
+            emb = (data.get("embedding") or {}).get("values")
+            if isinstance(emb, list) and len(emb) == _GEMINI_DIMS:
+                return [float(x) for x in emb]
+            embs = data.get("embeddings")
+            if isinstance(embs, list) and embs and "values" in embs[0]:
+                vec = embs[0]["values"]
+                if isinstance(vec, list) and len(vec) == _GEMINI_DIMS:
+                    return [float(x) for x in vec]
+            return None
+    except Exception:
+        # Fallback to stdlib if httpx isn't present
+        try:
+            import json
+            from urllib.request import Request, urlopen
+            from urllib.error import URLError, HTTPError
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{_GEMINI_MODEL}:embedContent"
+            body = json.dumps({
+                "model": f"models/{_GEMINI_MODEL}",
+                "content": {"parts": [{"text": text}]},
+                "taskType": "RETRIEVAL_DOCUMENT",
+                "outputDimensionality": _GEMINI_DIMS,
+            }).encode("utf-8")
+            req = Request(url, data=body, headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": _GEMINI_KEY,
+            }, method="POST")
+            with urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                emb = (data.get("embedding") or {}).get("values")
+                if isinstance(emb, list) and len(emb) == _GEMINI_DIMS:
+                    return [float(x) for x in emb]
+                embs = data.get("embeddings")
+                if isinstance(embs, list) and embs and "values" in embs[0]:
+                    vec = embs[0]["values"]
+                    if isinstance(vec, list) and len(vec) == _GEMINI_DIMS:
+                        return [float(x) for x in vec]
+            return None
+        except (URLError, HTTPError, Exception):
+            return None
 
-@lru_cache(maxsize=256)
-def _embed_cached(text: str) -> Optional[tuple[float, ...]]:
+def _embed_cached(text: str) -> Optional[Tuple[float, ...]]:
     v = _embed_vec(text)
     if not v:
         return None
@@ -80,8 +111,12 @@ def _trim(s: Optional[str], n: int) -> str:
     s = str(s)
     return s if len(s) <= n else s[: n - 1] + "…"
 
+# (…rest of file stays exactly as you pasted; unchanged below…)
+
+from .calendar_client import find_free_slots, suggest_windows
+from .config import settings
 # ─────────────────────────────────────────────────────────
-# TRANSPARENT QUERY BUILDER
+# Transparent query builder
 # ─────────────────────────────────────────────────────────
 def build_semantic_query(
     *,
@@ -90,14 +125,6 @@ def build_semantic_query(
     thread_text: str = "",
     max_thread_tail: int = 1200,
 ) -> Dict[str, Any]:
-    """
-    Deterministic, inspectable query construction.
-    Returns:
-      {
-        "parts": {"subject":..., "body":..., "thread_tail":...},
-        "query": "... (subject\\nbody\\nthread_tail) ..."
-      }
-    """
     subj = (subject or "").strip()
     bod = (body or "").strip()
     tail = (thread_text or "").strip()
@@ -108,9 +135,8 @@ def build_semantic_query(
     return {"parts": parts, "query": query}
 
 # ─────────────────────────────────────────────────────────
-# Low-level searches that expose source + score
+# Low-level searches (vector → fulltext → loose fulltext)
 # ─────────────────────────────────────────────────────────
-# recruiting/tools.py (edit semantic_docs_raw)
 def semantic_docs_raw(query: str, k: int = 5, *, loose_fulltext: bool = False) -> Dict[str, Any]:
     k = max(1, min(int(k), 100))
     qv = _embed_cached(query)
@@ -125,7 +151,6 @@ def semantic_docs_raw(query: str, k: int = 5, *, loose_fulltext: bool = False) -
         if rows:
             return {"source": "vector", "k": k, "query": query, "docs": [r["doc"] for r in rows]}
 
-    # normal fulltext
     cy2 = """
     CALL db.index.fulltext.queryNodes('EcoLocalDocsText', $term) YIELD node, score
     RETURN { id: node.id, title: node.title, text: node.text, tags: node.tags, score: score } AS doc
@@ -139,7 +164,6 @@ def semantic_docs_raw(query: str, k: int = 5, *, loose_fulltext: bool = False) -
         pass
 
     if loose_fulltext:
-        # Lucene loose query: OR the terms + fuzzy suffix + wildcard
         terms = [t for t in query.split() if t]
         if terms:
             loose = " OR ".join([f"{t}~ OR {t}*" for t in terms])
@@ -153,7 +177,6 @@ def semantic_docs_raw(query: str, k: int = 5, *, loose_fulltext: bool = False) -
     return {"source": "none", "k": k, "query": query, "docs": []}
 
 def semantic_status() -> Dict[str, Any]:
-    # SHOW INDEXES is a Cypher command (not a procedure) in Neo4j 5
     idx_rows = _run("""
         SHOW INDEXES
         YIELD name, type, entityType, labelsOrTypes, properties, state
@@ -175,11 +198,9 @@ def semantic_status() -> Dict[str, Any]:
     }
 
 def semantic_docs(query: str, k: int = 5) -> List[Dict[str, Any]]:
-    """Convenience wrapper returning just list of docs."""
     return semantic_docs_raw(query, k).get("docs", [])
 
 def semantic_topk_for_thread(env_or_dict: Any, k: int = 5) -> List[Dict[str, Any]]:
-    """Prompt-ready docs with id/title/tags/score/snippet."""
     try:
         subject = (getattr(env_or_dict, "subject", None) or env_or_dict.get("subject") or "").strip()
     except Exception:
@@ -207,14 +228,11 @@ def semantic_topk_for_thread(env_or_dict: Any, k: int = 5) -> List[Dict[str, Any
             "score": float(d.get("score")) if d.get("score") is not None else None,
         })
     return out
+
 # ─────────────────────────────────────────────────────────
 # Thread context for LLMs
 # ─────────────────────────────────────────────────────────
 def thread_context(thread_id: str) -> str:
-    """
-    Return a lightweight plain-text rendering of the thread for grounding the LLM.
-    We try Neo4j first (if you persist messages), otherwise fall back to a stub.
-    """
     if not thread_id:
         return ""
     try:
@@ -242,7 +260,7 @@ def thread_context(thread_id: str) -> str:
     return f"(thread:{thread_id})"
 
 # ─────────────────────────────────────────────────────────
-# Calendar helpers (LLM-facing legacy utilities remain)
+# Calendar helpers
 # ─────────────────────────────────────────────────────────
 def _parse_days(hint: Union[str, int]) -> int:
     if isinstance(hint, int):
@@ -292,7 +310,7 @@ def gmail_fetch_recent_unseen(user: str = INBOX_ADDR, label: str = "INBOX", sinc
     return fetch_unseen_since(minutes=since_minutes, label=label)
 
 # ─────────────────────────────────────────────────────────
-# Slot diversification helpers (optional, kept for other flows)
+# Slot diversification helpers
 # ─────────────────────────────────────────────────────────
 def _dt_from_iso(dt_iso: str) -> datetime:
     try:

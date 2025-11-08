@@ -10,14 +10,9 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from email.utils import parseaddr
 
-try:
-    import httpx  # prefer httpx if available
-except Exception:  # pragma: no cover
-    httpx = None
-
 from .branding import header_logo_src_email  # <- email-safe https/data logo
 from .llm_client import generate_json as _gen_json
-from .tools import thread_context, semantic_topk_for_thread
+from .tools import thread_context, semantic_topk_for_thread, semantic_docs
 from .calendar_client import (
     is_range_free,
     suggest_windows,  # windowed search
@@ -246,7 +241,7 @@ def _trim_doc(d: Dict[str, Any], *, max_chars: int = 1200) -> Dict[str, Any]:
     }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Semantic (QUERY-based) via HTTP with fallback to local tools
+# (Legacy keyword helpers kept in case you re-enable candidate generation)
 # ──────────────────────────────────────────────────────────────────────────────
 
 STOPWORDS = {
@@ -276,83 +271,35 @@ def _keywords_from_subject_body(subject: str, body: str) -> List[str]:
             seen.add(t); out.append(t)
     return out[:20]
 
-def _build_semantic_candidates(email: EmailEnvelope) -> List[str]:
-    subj = (email.subject or "")
-    body_clean = _strip_quoted_email(email.plain_body or "")
-    kws = _keywords_from_subject_body(subj, body_clean)
-    kwset = set(kws)
-    candidates: List[str] = []
-
-    if {"pricing", "price", "cost", "fee", "membership"} & kwset:
-        candidates.append("pricing structure for businesses")
-    if {"points", "point", "currency", "eco", "token", "reward", "visits"} & kwset:
-        candidates.append("ECO points system for businesses and proof of visits")
-    if {"join", "sign", "onboard", "list", "offer", "partners", "business"} & kwset:
-        candidates.append("For Businesses - List an offer")
-    if {"youth", "scan", "map", "redeem"} & kwset:
-        candidates.append("For Youth - Find offers nearby")
-
-    if body_clean:
-        first_sent = re.split(r"[.!?]", body_clean)[0].strip()
-        if first_sent and len(first_sent.split()) >= 3:
-            candidates.append(first_sent)
-
-    candidates.append("ECO Local overview")
-
-    seen = set(); uniq = []
-    for c in candidates:
-        if c and c not in seen:
-            seen.add(c); uniq.append(c)
-    return uniq[:6]
-
-def _fetch_semantic_docs_http_query(query: str, *, k: int, loose: bool, api_base: str) -> List[Dict[str, Any]]:
-    if not httpx:
-        return []
-    url = api_base.rstrip("/") + "/debug/semantic/query"
-    params = {"query": query, "k": int(k), "loose": 1 if loose else 0}
-    try:
-        with httpx.Client(timeout=5.0) as client:
-            r = client.get(url, params=params)
-            r.raise_for_status()
-            data = r.json()
-            docs = data.get("results") or data.get("docs") or []
-            return [_trim_doc(d) for d in docs]
-    except Exception as e:
-        log.warning("semantic HTTP (query) fetch failed for %r: %s", query, e)
-        return []
+# ──────────────────────────────────────────────────────────────────────────────
+# Semantic docs: LOCAL ONLY (no HTTP; ignores ECO_LOCAL_API_BASE)
+# ──────────────────────────────────────────────────────────────────────────────
 
 def _get_semantic_docs(
     email: EmailEnvelope,
     *,
     k: int,
-    loose: bool,
-    semantic_query_override: Optional[str] = None
+    loose: bool,  # retained for signature compatibility; unused here
+    semantic_query_override: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    api_base = os.getenv("ECO_LOCAL_API_BASE", "").strip()
-
-    if api_base:
-        queries: List[str] = []
+    """
+    Local-only semantic retrieval.
+    1) If override query provided: use local semantic_docs(query, k).
+    2) Else: use semantic_topk_for_thread(email, k).
+    """
+    try:
         if semantic_query_override:
-            qv = semantic_query_override.strip()
-            if qv:
-                queries.append(qv)
-        queries.extend(_build_semantic_candidates(email))
-
-        for q in queries:
-            docs = _fetch_semantic_docs_http_query(q, k=k, loose=loose, api_base=api_base)
-            log.info("[llm_flow] semantic probe query_used=%r hits=%d", q, len(docs))
-            if docs:
-                return docs
+            docs = semantic_docs(semantic_query_override, k=k) or []
+            return [_trim_doc(d) for d in docs]
+    except Exception:
+        log.exception("semantic_docs(override) failed")
 
     try:
         docs = semantic_topk_for_thread(email, k=k) or []
-        if docs:
-            log.info("[llm_flow] semantic_context via local tools: %d docs", len(docs))
-            return [_trim_doc(d) for d in docs]
+        return [_trim_doc(d) for d in docs]
     except Exception:
         log.exception("semantic_topk_for_thread failed")
 
-    log.info("[llm_flow] semantic_context: 0 docs after all probes")
     return []
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -651,18 +598,20 @@ def run_llm_flow(
     allow_calendar_writes: bool = False,
     max_tool_rounds: int = 3,
     semantic_k: int = 5,
-    semantic_loose: bool = True,  # allow fuzzy full-text when needed
+    semantic_loose: bool = True,  # kept for signature compatibility
     semantic_query_override: Optional[str] = None,
 ) -> FlowOutput:
     z = ZoneInfo(tz)
 
-    # 0) Initial semantic injection (HTTP query first, local fallback)
+    # 0) Initial semantic injection (LOCAL ONLY)
     sem_docs = _get_semantic_docs(email, k=semantic_k, loose=semantic_loose, semantic_query_override=semantic_query_override)
     try:
         if sem_docs:
-            log.info("[llm_flow] injected %d semantic docs: %s",
-                     len(sem_docs),
-                     ", ".join([f"{(d.get('title') or '')[:40]}#{(d.get('id') or '')[:6]}" for d in sem_docs]))
+            log.info(
+                "[llm_flow] injected %d semantic docs: %s",
+                len(sem_docs),
+                ", ".join([f"{(d.get('title') or '')[:40]}#{(d.get('id') or '')[:6]}" for d in sem_docs]),
+            )
         else:
             log.info("[llm_flow] injected 0 semantic docs")
     except Exception:
@@ -682,16 +631,15 @@ def run_llm_flow(
         has_questions=bool(a_raw.get("has_questions", False)),
     )
 
-    # 1b) Optional targeted retrieval pass if there ARE questions
+    # 1b) Optional targeted retrieval pass if there ARE questions (LOCAL ONLY)
     if plan.has_questions and plan.explicit_questions:
-        api_base = os.getenv("ECO_LOCAL_API_BASE", "").strip()
-        if api_base:
-            targeted = _fetch_semantic_docs_http_query(
-                query=plan.explicit_questions, k=semantic_k, loose=semantic_loose, api_base=api_base
-            )
+        try:
+            targeted = semantic_docs(plan.explicit_questions, k=semantic_k) or []
             if targeted:
-                sem_docs = targeted
-                log.info("[llm_flow] reloaded semantic docs from explicit_questions (%d docs)", len(sem_docs))
+                sem_docs = [_trim_doc(d) for d in targeted]
+                log.info("[llm_flow] reloaded semantic docs from explicit_questions (local) %d docs", len(sem_docs))
+        except Exception:
+            log.exception("semantic_docs(explicit_questions) failed")
 
     tool_rounds: List[ToolRound] = []
 

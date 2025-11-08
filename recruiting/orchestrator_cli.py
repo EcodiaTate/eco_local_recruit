@@ -32,6 +32,7 @@ from .calendar_client import _tz as _cal_tz  # type: ignore
 from .calendar_client import _build_calendar_service  # type: ignore
 from .config import settings
 from .tools import calendar_suggest_windows  # agentic, scored windows
+from .tools import semantic_docs, semantic_topk_for_thread  # <-- NEW: semantic tests
 
 # --- LLM drafting (first touch lives in outreach) ---
 from .outreach import draft_first_touch as outreach_draft_first_touch  # type: ignore
@@ -283,6 +284,69 @@ def cmd_cal_thread(args: argparse.Namespace) -> None:
     holds = list_holds(thread_id=args.thread_id, lookback_days=args.back, lookahead_days=args.forward, trace_id="cli-thread")
     print("CONFIRMED:"); _print_events(conf)
     print("HOLDS:"); _print_events(holds)
+
+# ---------- Commands: SEMANTIC (local-only) ----------
+
+def _trim_doc(doc: Dict[str, Any], *, max_chars: int) -> Dict[str, Any]:
+    text = (doc.get("text") or doc.get("snippet_300") or "")[:max_chars]
+    return {
+        "id": doc.get("id"),
+        "title": doc.get("title"),
+        "tags": doc.get("tags") or [],
+        "score": doc.get("score"),
+        "text": text,
+    }
+
+def _pp_docs(docs: List[Dict[str, Any]]) -> None:
+    if not docs:
+        print("  (no results)")
+        return
+    for i, d in enumerate(docs, 1):
+        print(f"[{i}] {d.get('title') or '(untitled)'}  (score={d.get('score')})  id={d.get('id')}")
+        if d.get("tags"):
+            print("    tags:", ", ".join(map(str, d["tags"])))
+        txt = (d.get("text") or "").strip()
+        if txt:
+            preview = txt if len(txt) <= 280 else txt[:280] + f"... (+{len(txt)-280} chars)"
+            print("    └─", preview)
+
+def cmd_semantic_query(args: argparse.Namespace) -> None:
+    """Local embedding/full-text retrieval for a free-form query."""
+    q = args.query.strip()
+    docs = semantic_docs(q, k=args.k) or []
+    trimmed = [_trim_doc(d, max_chars=args.max_chars) for d in docs]
+    print(f"[semantic-query] q={q!r} k={args.k} results={len(trimmed)} (local)")
+    if args.json:
+        import json
+        print(json.dumps(trimmed, ensure_ascii=False, indent=2))
+    else:
+        _pp_docs(trimmed)
+
+def cmd_semantic_thread(args: argparse.Namespace) -> None:
+    """
+    Local retrieval using a Gmail thread-id context.
+    We construct a minimal envelope with just thread_id (other fields optional).
+    """
+    # Minimal envelope-like dict that your tools expect
+    envelope: Dict[str, Any] = {
+        "thread_id": args.thread_id,
+        "message_id": "",
+        "from_addr": "",
+        "to_addr": "",
+        "subject": args.subject or "",
+        "received_at_iso": datetime.now(_cal_tz()).isoformat(),
+        "plain_body": args.body or "",
+        "html_body": None,
+        "thread_text": None,
+    }
+    docs = semantic_topk_for_thread(envelope, k=args.k) or []
+    trimmed = [_trim_doc(d, max_chars=args.max_chars) for d in docs]
+    print(f"[semantic-thread] thread_id={args.thread_id} k={args.k} results={len(trimmed)} (local)")
+    if args.json:
+        import json
+        print(json.dumps(trimmed, ensure_ascii=False, indent=2))
+    else:
+        _pp_docs(trimmed)
 
 # ---------- Commands: outreach build/send ----------
 
@@ -572,7 +636,6 @@ def cmd_cal_promote(args: argparse.Namespace) -> None:
           ((ev.get("extendedProperties") or {}).get("private") or {}).get("ecoLocalKind"),
           "|", ev.get("htmlLink"))
 
-
 # ---------- Parser ----------
 
 def _human_label(s: Dict[str, Any]) -> str:
@@ -622,6 +685,24 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser("ECO Local Orchestrator CLI (idempotent)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    # --- Semantic (local-only) ---
+    sq = sub.add_parser("semantic-query", help="Local semantic retrieval for a free-form query")
+    sq.add_argument("--query", "-q", required=True)
+    sq.add_argument("--k", type=int, default=5)
+    sq.add_argument("--max-chars", type=int, default=600)
+    sq.add_argument("--json", action="store_true", help="Print raw JSON")
+    sq.set_defaults(func=cmd_semantic_query)
+
+    st = sub.add_parser("semantic-thread", help="Local semantic retrieval for a Gmail thread id")
+    st.add_argument("--thread-id", required=True)
+    st.add_argument("--subject", type=str, help="Optional subject hint")
+    st.add_argument("--body", type=str, help="Optional body hint")
+    st.add_argument("--k", type=int, default=5)
+    st.add_argument("--max-chars", type=int, default=600)
+    st.add_argument("--json", action="store_true", help="Print raw JSON")
+    st.set_defaults(func=cmd_semantic_thread)
+
+    # --- Calendar / scheduling helpers ---
     s = sub.add_parser("slots", help="Suggest human-friendly windows (non-binding)")
     s.add_argument("--days", type=int, default=10)
     s.add_argument("--hold", type=int, default=30)
@@ -671,6 +752,7 @@ def build_parser() -> argparse.ArgumentParser:
     th.add_argument("--end", type=str)
     th.set_defaults(func=cmd_cal_thread)
 
+    # --- Outreach build/send ---
     b = sub.add_parser("build", help="Build (idempotent) drafts for a run date")
     b.add_argument("--date", type=str)
     b.add_argument("--freeze", action="store_true")
@@ -690,6 +772,7 @@ def build_parser() -> argparse.ArgumentParser:
     se.add_argument("--date", type=str)
     se.set_defaults(func=cmd_send)
 
+    # --- Inbox + hygiene ---
     pi = sub.add_parser("poll-inbox", help="Process Gmail inbox")
     pi.set_defaults(func=cmd_poll_inbox)
 
