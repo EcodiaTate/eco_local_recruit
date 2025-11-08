@@ -1,3 +1,4 @@
+# recruiting/orchestrator_cli.py
 from __future__ import annotations
 
 import argparse
@@ -32,15 +33,23 @@ from .calendar_client import _build_calendar_service  # type: ignore
 from .config import settings
 from .tools import calendar_suggest_windows  # agentic, scored windows
 
+# --- LLM drafting (first touch lives in outreach) ---
+from .outreach import draft_first_touch as outreach_draft_first_touch  # type: ignore
+try:
+    # Optional; only used if --include-followups is passed and function exists
+    from .outreach import draft_followup as outreach_draft_followup  # type: ignore
+except Exception:
+    outreach_draft_followup = None  # type: ignore
+
 # ---- robust discovery-module loader (scrape/parse/qualify/profile) ----
 import importlib
 import importlib.util
+import sys as _sys
 
 HERE = Path(__file__).resolve()
 PKG_DIR = HERE.parent            # /app/recruiting
 APP_ROOT = PKG_DIR.parent        # /app
 
-import sys as _sys
 if str(APP_ROOT) not in _sys.path:
     _sys.path.insert(0, str(APP_ROOT))
 
@@ -120,8 +129,6 @@ def _today_or(v: Optional[str]) -> date:
     return date.fromisoformat(v) if v else date.today()
 
 # ---------- Small datetime helpers (CLI-only) ----------
-from typing import Optional  # ensure this import exists at top
-
 
 def _dt_local(s: Optional[str], *, default: Optional[datetime] = None) -> datetime:
     """
@@ -280,24 +287,49 @@ def cmd_cal_thread(args: argparse.Namespace) -> None:
 # ---------- Commands: outreach build/send ----------
 
 def cmd_build(args: argparse.Namespace) -> None:
+    """
+    Build a run:
+    - First-touch drafts are generated via outreach.draft_first_touch (LLM).
+    - Followups are NOT drafted here by default (your flow handles them).
+      Pass --include-followups to let the CLI draft followups if
+      outreach.draft_followup exists.
+    """
     run_date = _today_or(args.date)
     run = store.create_run(run_date)
 
+    # --- First touches (LLM-backed)
     first_quota = store.get_first_touch_quota()
     first_prospects = store.select_prospects_for_first_touch(first_quota)
     print(f"[build] first-touch prospects: {len(first_prospects)}")
     for p in first_prospects:
-        subj, body = _draft_first_touch(p)
+        try:
+            subj, body = outreach_draft_first_touch(p, trace_id="cli-build-first")
+        except Exception as e:
+            print(f"[build] WARN: outreach.draft_first_touch failed for {p.get('email') or p.get('domain')}: {e}")
+            # Hard stop feels better than silently queuing junk
+            raise
         store.attach_draft_email(run, p, "first", subj, body)
 
-    follow_days = store.get_followup_days()
-    follow_prospects = store.select_prospects_for_followups(run_date, follow_days)
-    print(f"[build] followup prospects: {len(follow_prospects)}")
-    for p in follow_prospects:
-        attempt_no = int(p.get("attempt_count", 0)) + 1
-        subj, body = _draft_followup(p, attempt_no)
-        kind = f"followup{attempt_no}" if attempt_no < store.get_max_attempts() else "final"
-        store.attach_draft_email(run, p, kind, subj, body)
+    # --- Followups (opt-in only)
+    if getattr(args, "include_followups", False):
+        if outreach_draft_followup is None:
+            print("[build] --include-followups requested, but outreach.draft_followup is not available. Skipping.")
+        else:
+            follow_days = store.get_followup_days()
+            follow_prospects = store.select_prospects_for_followups(run_date, follow_days)
+            print(f"[build] followup prospects: {len(follow_prospects)}")
+            max_attempts = store.get_max_attempts()
+            for p in follow_prospects:
+                attempt_no = int(p.get("attempt_count", 0)) + 1
+                try:
+                    subj, body = outreach_draft_followup(p, attempt_no=attempt_no, max_attempts=max_attempts, trace_id="cli-build-follow")  # type: ignore
+                except Exception as e:
+                    print(f"[build] WARN: outreach.draft_followup failed for {p.get('email') or p.get('domain')}: {e}")
+                    continue
+                kind = f"followup{attempt_no}" if attempt_no < max_attempts else "final"
+                store.attach_draft_email(run, p, kind, subj, body)
+    else:
+        print("[build] followups: skipped (handled by your flow). Use --include-followups to draft here.")
 
     if args.freeze:
         store.freeze_run(run)
@@ -642,6 +674,8 @@ def build_parser() -> argparse.ArgumentParser:
     b = sub.add_parser("build", help="Build (idempotent) drafts for a run date")
     b.add_argument("--date", type=str)
     b.add_argument("--freeze", action="store_true")
+    b.add_argument("--include-followups", action="store_true",
+                   help="Also draft followups using outreach.draft_followup if available. Default: off.")
     b.set_defaults(func=cmd_build)
 
     pr = sub.add_parser("cal-promote", help="Promote a HOLD to CONFIRMED and notify")
@@ -686,30 +720,6 @@ def build_parser() -> argparse.ArgumentParser:
     dp.set_defaults(func=cmd_discover)
 
     return p
-
-
-# --- Drafting (store-only orchestration: keep drafters local to this file) ---
-
-def _draft_first_touch(p: Dict[str, Any]) -> tuple[str, str]:
-    """
-    Minimal first-touch email. Replace with your LLM-backed drafter if desired.
-    """
-    subj = f"Ecodia × {p.get('name') or p.get('domain') or 'your team'} — quick intro"
-    body = (
-        "<p>Hey! We’re building local value loops in Ecodia — "
-        "youth earn ECO for real actions, then retire ECO at local businesses.</p>"
-        "<p>Would you be open to a 20–30 min chat this week?</p>"
-    )
-    return subj, body
-
-
-def _draft_followup(p: Dict[str, Any], attempt_no: int) -> tuple[str, str]:
-    subj = f"Circling back — ECO Local × {p.get('name') or p.get('domain') or 'your team'}"
-    body = (
-        "<p>Following up on my note about ECO Local (earn from actions → retire at local businesses). "
-        "Happy to walk through how it works and show live results.</p>"
-    )
-    return subj, body
 
 
 def main() -> None:

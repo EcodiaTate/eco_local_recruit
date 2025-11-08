@@ -210,7 +210,7 @@ def _seed_default() -> Dict[str, Any]:
     """
     p = ProspectInput(
         name="Helen",
-        email="helen.donohoe@mic.qld.edu.au",
+        email="tate@ecodia.au",
         domain="mic.qld.edu.au",
         city="Sunshine Coast",
         state="QLD",
