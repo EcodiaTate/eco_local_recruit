@@ -39,46 +39,125 @@ from .calendar_client import _tz as _cal_tz  # type: ignore
 from .calendar_client import _build_calendar_service  # type: ignore
 from .config import settings
 from .tools import calendar_suggest_windows  # agentic, scored windows
-# ---- discovery stack (optional imports; we handle gracefully) ----
-_HAVE_STACK = True
-try:
-    # Preferred: package-relative (when `recruiting` is a package)
-    from . import scrape as _scrape  # type: ignore
-    from . import parse as _parse    # type: ignore
-    from . import qualify as _qualify  # type: ignore
-    from . import profile as _profile  # type: ignore
-    from ..seed_cli import upsert_prospect, qualify_basic  # type: ignore
-except Exception as e_rel:
+
+# ---- robust discovery-module loader (scrape/parse/qualify/profile) ----
+import importlib
+import importlib.util
+
+HERE = Path(__file__).resolve()
+PKG_DIR = HERE.parent            # /app/recruiting
+APP_ROOT = PKG_DIR.parent        # /app
+
+def _import_by_spec(module_name: str, file_path: Path):
+    spec = importlib.util.spec_from_file_location(module_name, file_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load {module_name} from {file_path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[attr-defined]
+    return mod
+
+def _load_discover_modules():
+    """
+    Try to import scrape/parse/qualify/profile that live next to this file.
+    Strategies:
+      1) from recruiting import scrape, parse, qualify, profile
+      2) from . import scrape, parse, qualify, profile
+      3) direct file import from PKG_DIR/*.py
+    """
+    errors = []
+
+    # 1) absolute package import
     try:
-        # Fallback: fully qualified under eco_local (when imported as eco_local.recruiting.*)
-        from eco_local.recruiting import scrape as _scrape  # type: ignore
-        from eco_local.recruiting import parse as _parse    # type: ignore
-        from eco_local.recruiting import qualify as _qualify  # type: ignore
-        from eco_local.recruiting import profile as _profile  # type: ignore
+        from recruiting import scrape, parse, qualify, profile  # type: ignore
+        return scrape, parse, qualify, profile
+    except Exception as e:
+        errors.append(("recruiting.*", repr(e)))
+
+    # 2) package-relative
+    try:
+        from . import scrape, parse, qualify, profile  # type: ignore
+        return scrape, parse, qualify, profile
+    except Exception as e:
+        errors.append((".<mods>", repr(e)))
+
+    # 3) direct-by-file
+    try:
+        scr = _import_by_spec("recruiting.scrape", PKG_DIR / "scrape.py")
+        par = _import_by_spec("recruiting.parse", PKG_DIR / "parse.py")
+        qua = _import_by_spec("recruiting.qualify", PKG_DIR / "qualify.py")
+        pro = _import_by_spec("recruiting.profile", PKG_DIR / "profile.py")
+        return scr, par, qua, pro
+    except Exception as e:
+        errors.append(("by-spec", repr(e)))
+
+    print("[discover] import failed across strategies.")
+    print(f"[discover] __file__: {HERE}")
+    print(f"[discover] cwd: {Path.cwd()}")
+    print(f"[discover] sys.path[0]: {_sys.path[0] if _sys.path else ''}")
+    print(f"[discover] sys.path: {_sys.path}")
+    for rel in ["scrape.py", "parse.py", "qualify.py", "profile.py", "__init__.py"]:
+        print(f"[discover] exists {rel}? -> {(PKG_DIR / rel).exists()}")
+    for where, err in errors:
+        print(f"[discover]   strategy '{where}' error: {err}")
+    raise ImportError("Failed to import discovery modules via all strategies.")
+
+_scrape, _parse, _qualify, _profile = _load_discover_modules()
+
+# ---- robust seed helpers loader (upsert_prospect / qualify_basic) ----
+def _load_seed_helpers():
+    """
+    Try several import paths for seed_cli; otherwise proxy to store.* if available.
+    """
+    # 1) recruiting.seed_cli
+    try:
+        from recruiting.seed_cli import upsert_prospect, qualify_basic  # type: ignore
+        return upsert_prospect, qualify_basic
+    except Exception:
+        pass
+    # 2) top-level seed_cli
+    try:
+        from seed_cli import upsert_prospect, qualify_basic  # type: ignore
+        return upsert_prospect, qualify_basic
+    except Exception:
+        pass
+    # 3) eco_local.seed_cli (monorepo style)
+    try:
         from eco_local.seed_cli import upsert_prospect, qualify_basic  # type: ignore
-    except Exception as e_abs1:
-        try:
-            # Fallback: top-level recruiting.* (matches your FastAPI imports)
-            from recruiting import scrape as _scrape  # type: ignore
-            from recruiting import parse as _parse    # type: ignore
-            from recruiting import qualify as _qualify  # type: ignore
-            from recruiting import profile as _profile  # type: ignore
-            from seed_cli import upsert_prospect, qualify_basic  # type: ignore
-        except Exception as e_abs2:
-            _HAVE_STACK = False
-            if os.getenv("ECO_LOCAL_DEBUG", "1").lower() in {"1","true","yes","on"}:
-                import sys, pathlib
-                print("[discover] import failed (relative, eco_local.*, then top-level).")
-                print("  relative error:", repr(e_rel))
-                print("  eco_local error:", repr(e_abs1))
-                print("  top-level error:", repr(e_abs2))
-                print("[discover] __file__:", __file__)
-                print("[discover] cwd:", os.getcwd())
-                print("[discover] sys.path[0]:", sys.path[0])
-                print("[discover] sys.path:", sys.path)
-                base = pathlib.Path(__file__).resolve().parent
-                for rel in ["scrape.py","parse.py","qualify.py","profile.py","../seed_cli.py","__init__.py"]:
-                    print(f"[discover] exists {rel}? ->", (base / rel).resolve().exists())
+        return upsert_prospect, qualify_basic
+    except Exception:
+        pass
+    # 4) direct-by-file (repo_root/seed_cli.py or /app/seed_cli.py)
+    for cand in [APP_ROOT / "seed_cli.py", APP_ROOT.parent / "seed_cli.py"]:
+        if cand.exists():
+            mod = _import_by_spec("seed_cli", cand)
+            up = getattr(mod, "upsert_prospect", None)
+            qb = getattr(mod, "qualify_basic", None)
+            if callable(up) and callable(qb):
+                return up, qb
+
+    # 5) proxy to store if it exposes similar helpers
+    def _store_upsert_proxy(p):
+        for fname in ("upsert_prospect", "create_prospect", "upsert_or_create_prospect"):
+            fn = getattr(store, fname, None)
+            if callable(fn):
+                return fn(p)
+        raise RuntimeError(
+            "No seed_cli and store lacks upsert helper. Provide seed_cli.upsert_prospect "
+            "or implement store.upsert_prospect/create_prospect."
+        )
+
+    def _store_qualify_proxy(node_id: str, score: float, reason: str):
+        for fname in ("qualify_basic", "set_prospect_score", "update_prospect_score"):
+            fn = getattr(store, fname, None)
+            if callable(fn):
+                return fn(node_id, score=score, reason=reason)
+        # If nothing, act as no-op
+        print("[discover] qualify proxy: no store helper; skipping score update.")
+        return None
+
+    return _store_upsert_proxy, _store_qualify_proxy
+
+upsert_prospect, qualify_basic = _load_seed_helpers()
 
 # ---------------- flags ----------------
 DRY_RUN = os.getenv("DRY_RUN", "0").strip().lower() in {"1", "true", "yes", "on"}
@@ -143,20 +222,13 @@ def _bind_outreach(allow_fallback: bool):
 
 def _today_or(v: Optional[str]) -> date:
     return date.fromisoformat(v) if v else date.today()
+
 # ---------- Small datetime helpers (CLI-only) ----------
 from typing import Optional  # ensure this import exists at top
 
 def _dt_local(s: Optional[str], *, default: Optional[datetime] = None) -> datetime:
     """
     Parse a local-friendly datetime string into a timezone-aware datetime.
-
-    Accepts:
-      - None               -> default or now (in calendar TZ)
-      - "now"              -> current time (calendar TZ)
-      - "today"            -> today at 00:00 (calendar TZ)
-      - "tomorrow"         -> tomorrow at 00:00 (calendar TZ)
-      - ISO datetime       -> e.g. "2025-11-05T15:00:00+10:00" or "2025-11-05T15:00:00"
-      - ISO date only      -> e.g. "2025-11-05" (interpreted as local midnight)
     """
     tz = _cal_tz()
 
@@ -389,15 +461,10 @@ def cmd_cleanup_holds(args: argparse.Namespace) -> None:
     print(f"[calendar] cleanup stats={stats}")
 
 # ---------- Commands: discovery / seeding (updated with pre-fit threshold) ----------
-from . import store  # already imported above
 
 def _heuristic_pre_fit(parsed: Dict[str, Any], domain: Optional[str]) -> float:
     """
     Lightweight pre-fit estimate when _qualify has no pre-scorer.
-    Signals (bounded 0..1):
-      - in-domain email > generic role inbox > freemail (gmail/outlook/etc)
-      - presence of multiple emails
-      - presence of phone
     """
     if not parsed:
         return 0.30
@@ -452,14 +519,8 @@ def _pre_fit_score(parsed: Dict[str, Any], domain: Optional[str]) -> Tuple[float
     return _heuristic_pre_fit(parsed, domain), "heuristic_pre_fit"
 
 def cmd_discover(args: argparse.Namespace) -> None:
-    if not _HAVE_STACK:
-        raise RuntimeError(
-            "Discovery stack unavailable (scrape/parse/qualify/profile/seed_cli imports failed). "
-            "Fix package layout or sys.path. Ensure recruiting/__init__.py exists and that either "
-            "top-level 'recruiting.*' or 'eco_local.recruiting.*' is importable."
-        )
     store.ensure_dedupe_constraints()  # make sure constraints exist
-    
+
     query = args.query
     city = args.city
     limit = int(args.limit)
@@ -500,7 +561,7 @@ def cmd_discover(args: argparse.Namespace) -> None:
             pre_fit, pre_reason = (0.0, "pre-fit error")
         if pre_fit < min_fit:
             skipped += 1
-            # You can mark as seen to avoid re-enqueue in future passes:
+            # mark as seen to avoid re-enqueue in future passes:
             store.mark_seen_candidate(domain=domain, email=best_email, name=name)
             print(f"  - skip (below min_fit {min_fit:.2f}): {domain or name} | pre_fit={pre_fit:.2f} ({pre_reason})")
             continue
@@ -520,16 +581,23 @@ def cmd_discover(args: argparse.Namespace) -> None:
             continue
 
         # Upsert prospect (include email if we have it)
-        node = upsert_prospect(type("P", (), {
-            "name": name,
-            "email": best_email,
-            "domain": domain,
-            "city": city_,
-            "state": None,
-            "country": None,
-            "phone": None,
-            "source": "discover"
-        })())
+        try:
+            node = upsert_prospect(type("P", (), {
+                "name": name,
+                "email": best_email,
+                "domain": domain,
+                "city": city_,
+                "state": None,
+                "country": None,
+                "phone": None,
+                "source": "discover"
+            })())
+        except Exception as e:
+            # Make the failure extremely obvious and actionable
+            raise RuntimeError(
+                "Failed to upsert prospect. Ensure seed_cli.upsert_prospect exists OR expose a "
+                "compatible helper on store (upsert_prospect/create_prospect)."
+            ) from e
 
         # Immediately mark “seen” so later passes won’t re-enqueue
         store.mark_seen_candidate(domain=domain, email=best_email, name=name)
@@ -540,7 +608,10 @@ def cmd_discover(args: argparse.Namespace) -> None:
         except Exception:
             # keep at least pre-fit rather than nuking a good pre-signal
             score, reason = (max(pre_fit, 0.6), "fallback score (qualify error)")
-        qualify_basic(node["id"], score=score, reason=reason)
+        try:
+            qualify_basic(node["id"], score=score, reason=reason)
+        except Exception:
+            print("[discover] warn: qualify_basic missing; score not persisted")
 
         # Profile node
         try:
@@ -552,6 +623,7 @@ def cmd_discover(args: argparse.Namespace) -> None:
         print(f"  - upserted: {best_email or domain or name} | pre_fit={pre_fit:.2f} | qual={score:.2f} | {reason}")
 
     print(f"[discover] done. accepted={accepted} skipped={skipped} deduped={deduped} require_email={require_email} min_fit={min_fit:.2f}")
+
 def cmd_cal_promote(args: argparse.Namespace) -> None:
     from .calendar_client import promote_hold_to_event
     ev = promote_hold_to_event(
@@ -586,6 +658,7 @@ def _human_label(s: Dict[str, Any]) -> str:
     if reason:
         bits.append(f"- {reason}")
     return " ".join(bits)
+
 def cmd_cal_supersede(args: argparse.Namespace) -> None:
     from .calendar_client import supersede_thread_booking
     start = _dt_local(args.start)
@@ -599,6 +672,7 @@ def cmd_cal_supersede(args: argparse.Namespace) -> None:
         trace_id="cli-supersede",
     )
     print("[supersede] id:", ev.get("id"), ev.get("htmlLink"))
+
 def cmd_cal_cancel_thread(args: argparse.Namespace) -> None:
     from .calendar_client import cancel_thread_events
     stats = cancel_thread_events(thread_id=args.thread_id, trace_id="cli-cancel-thread")
@@ -619,6 +693,7 @@ def build_parser() -> argparse.ArgumentParser:
     fb.add_argument("--days", type=int, default=14)
     fb.add_argument("--calendar", type=str)
     fb.set_defaults(func=cmd_cal_freebusy)
+
     sp = sub.add_parser("cal-supersede", help="Reschedule confirmed for a thread (or create)")
     sp.add_argument("--thread-id", required=True)
     sp.add_argument("--start", required=True)
@@ -626,6 +701,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--hold", type=int, default=30)
     sp.add_argument("--email")
     sp.set_defaults(func=cmd_cal_supersede)
+
     ct = sub.add_parser("cal-cancel-thread", help="Delete all HOLD/CONFIRMED for a thread")
     ct.add_argument("--thread-id", required=True)
     ct.set_defaults(func=cmd_cal_cancel_thread)
@@ -635,6 +711,7 @@ def build_parser() -> argparse.ArgumentParser:
     ck.add_argument("--end", type=str)
     ck.add_argument("--hold", type=int, default=30)
     ck.set_defaults(func=cmd_cal_check)
+
     hd = sub.add_parser("cal-hold", help="Create a HOLD event")
     hd.add_argument("--start", required=True)
     hd.add_argument("--end")
@@ -659,6 +736,7 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--freeze", action="store_true")
     b.add_argument("--allow-fallback", action="store_true")
     b.set_defaults(func=cmd_build)
+
     pr = sub.add_parser("cal-promote", help="Promote a HOLD to CONFIRMED and notify")
     g = pr.add_mutually_exclusive_group(required=True)
     g.add_argument("--thread-id")

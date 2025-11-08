@@ -11,18 +11,27 @@ from datetime import datetime, timedelta, date
 from typing import Optional, Dict, Any, List, Tuple
 from pathlib import Path
 from random import Random
+import traceback
 
+# ---------------- Optional deps ----------------
 try:
     import httpx
 except Exception:
-    httpx = None
+    httpx = None  # type: ignore
 
-from dotenv import load_dotenv; load_dotenv()
+# ---------------- Env ----------------
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
 
+# ---------------- FastAPI ----------------
 from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+# ---------------- Local imports ----------------
 from recruiting.runsheet import hourly_inbox_poll
 from recruiting.config import settings
 from recruiting.debug_semantic import router as debug_semantic_router
@@ -31,16 +40,22 @@ from recruiting.timezones import resolve_tz
 from recruiting import orchestrator_cli as oc
 from recruiting.referral_jobs import router as dev_router
 
+# ---------------- Startup diag ----------------
 print("PYTHON:", sys.executable)
 print("VERSION:", sys.version)
 print("PLATFORM:", platform.platform())
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("eco_local.app")
 if not logging.getLogger().handlers:
-    logging.basicConfig(level=os.getenv("ECO_LOCAL_LOG_LEVEL", "INFO"))
+    logging.basicConfig(
+        level=os.getenv("ECO_LOCAL_LOG_LEVEL", "INFO"),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
 app = FastAPI(title="ECO Local Recruit Service", version="1.0.0", docs_url="/")
 
+# ---------------- CORS ----------------
+# NOTE: Cloud Scheduler / Cloud Run calls are server-to-server; CORS is only for browsers.
 ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://localhost:3001",
@@ -60,14 +75,16 @@ app.add_middleware(
     max_age=3600,
 )
 
+# ---------------- Routers ----------------
 app.include_router(debug_semantic_router)
 app.include_router(referrals_router)
 app.include_router(dev_router)
 
+# ---------------- Static mount ----------------
 APP_FILE = Path(__file__).resolve()
-APP_DIR = APP_FILE.parent
-PKG_ROOT = APP_DIR.parent
-REPO_ROOT = PKG_ROOT.parent
+APP_DIR = APP_FILE.parent            # /app/app
+PKG_ROOT = APP_DIR.parent            # /app
+REPO_ROOT = PKG_ROOT.parent          # /
 
 ENV_STATIC = os.getenv("ECO_LOCAL_STATIC_DIR")
 CANDIDATES = [
@@ -85,6 +102,7 @@ if not STATIC_DIR:
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 log.info("Mounted static directory at /static from %s", STATIC_DIR)
 
+# ---------------- TZ ----------------
 LOCAL_TZ = resolve_tz(settings.LOCAL_TZ or "Australia/Brisbane")
 
 def _days_since_epoch_au(dt: Optional[date] = None) -> int:
@@ -93,10 +111,17 @@ def _days_since_epoch_au(dt: Optional[date] = None) -> int:
     epoch = datetime(1970, 1, 1, tzinfo=tz)
     return (now - epoch).days
 
+# ---------------- Health ----------------
 @app.get("/healthz")
 def healthz() -> Dict[str, Any]:
     return {"ok": True, "service": "eco_local-recruit", "env": settings.ENV}
 
+@app.get("/readyz")
+def readyz() -> Dict[str, Any]:
+    # Add deeper checks here if needed (neo4j ping, etc.)
+    return {"ok": True, "ts": time.time()}
+
+# ---------------- Outreach (build/send) ----------------
 @app.post("/eco_local/recruit/outreach/build")
 def outreach_build(
     date_iso: str | None = None,
@@ -104,34 +129,42 @@ def outreach_build(
     allow_fallback: bool = False,
 ):
     argv = ["build"]
-    if date_iso: argv += ["--date", date_iso]
-    if freeze:   argv += ["--freeze"]
-    if allow_fallback: argv += ["--allow-fallback"]
+    if date_iso:
+        argv += ["--date", date_iso]
+    if freeze:
+        argv += ["--freeze"]
+    if allow_fallback:
+        argv += ["--allow-fallback"]
     try:
         oc.invoke(argv)
         return {"ok": True, "argv": argv}
     except Exception as e:
+        log.error("[outreach/build] failed: %s\n%s", e, traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/eco_local/recruit/outreach/send")
 def outreach_send(date_iso: str | None = None):
     argv = ["send"]
-    if date_iso: argv += ["--date", date_iso]
+    if date_iso:
+        argv += ["--date", date_iso]
     try:
         oc.invoke(argv)
         return {"ok": True, "argv": argv}
     except Exception as e:
+        log.error("[outreach/send] failed: %s\n%s", e, traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
+# ---------------- Simple discover proxy ----------------
 @app.post("/eco_local/recruit/discover")
 async def discover(req: Request):
-    body = await req.json()
+    body = await _safe_json(req)
     query = body.get("query")
     city = body.get("city")
     limit = str(body.get("limit", 10))
     require_email = body.get("require_email", None)
     if not query or not city:
         raise HTTPException(status_code=400, detail="query and city are required")
+
     argv = ["discover", "--query", query, "--city", city, "--limit", limit]
     if require_email is True:
         argv += ["--require-email"]
@@ -141,16 +174,19 @@ async def discover(req: Request):
         oc.invoke(argv)
         return {"ok": True, "argv": argv}
     except Exception as e:
+        log.error("[discover] failed: %s\n%s", e, traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
+# ---------------- Inbox ----------------
 @app.post("/eco_local/recruit/inbox/poll")
 def poll_inbox() -> Dict[str, int]:
     processed = hourly_inbox_poll()
     return {"processed": processed}
 
+# ---------------- Webhook ----------------
 @app.post("/eco_local/recruit/signup/webhook")
 async def signup_webhook(req: Request) -> Dict[str, bool]:
-    payload = await req.json()
+    payload = await _safe_json(req)
     from recruiting.store import mark_signup_payload
     mark_signup_payload(payload)
     return {"ok": True}
@@ -160,6 +196,12 @@ async def signup_webhook(req: Request) -> Dict[str, bool]:
 # ──────────────────────────────────────────────────────────────────────────────
 _PLAN_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None, "etag": None}
 _PLAN_TTL_SECONDS = int(os.getenv("ECO_LOCAL_DISCOVER_PLAN_TTL", "600"))
+
+async def _safe_json(req: Request) -> Dict[str, Any]:
+    try:
+        return await req.json()
+    except Exception:
+        return {}
 
 def _fetch_json_url(url: str, cache: Dict[str, Any], ttl: int) -> Optional[Any]:
     if not httpx:
@@ -181,27 +223,29 @@ def _fetch_json_url(url: str, cache: Dict[str, Any], ttl: int) -> Optional[Any]:
         cache["ts"] = now
         cache["etag"] = resp.headers.get("ETag")
         return data
-    except Exception:
+    except Exception as e:
+        log.warning("[plan] fetch url failed (%s): %s", url, e)
         return None
 
 def _load_generator_plan(*, force_refresh: bool = False) -> Dict[str, Any]:
     """
     Single source of truth. If this fails, we error.
     Priority:
-      1) File ECO_LOCAL_DISCOVER_PLAN_FILE (e.g., /config/discover_plan.json)
+      1) File ECO_LOCAL_DISCOVER_PLAN_FILE (default: /config/discover_plan.json if /config exists)
       2) Env  ECO_LOCAL_DISCOVER_PLAN_JSON (inline JSON)
-      3) URL  ECO_LOCAL_DISCOVER_PLAN_URL  (DEFAULT points to your prod URL)
+      3) URL  ECO_LOCAL_DISCOVER_PLAN_URL  (default: /config/discover_rotation.json)
     """
-    # 1) file
-    path = os.getenv("ECO_LOCAL_DISCOVER_PLAN_FILE", "/config/discover_plan.json")
+    # 1) file (prefer /config mount automatically)
+    default_file = "/config/discover_plan.json" if os.path.isdir("/config") else ""
+    path = os.getenv("ECO_LOCAL_DISCOVER_PLAN_FILE", default_file or "")
     try:
-        if not force_refresh and os.path.isfile(path):
+        if path and os.path.isfile(path):
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, dict) and data:
                     return data
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("[plan] file load failed (%s): %s", path, e)
 
     # 2) env
     raw = os.getenv("ECO_LOCAL_DISCOVER_PLAN_JSON")
@@ -210,15 +254,11 @@ def _load_generator_plan(*, force_refresh: bool = False) -> Dict[str, Any]:
             data = json.loads(raw)
             if isinstance(data, dict) and data:
                 return data
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("[plan] env JSON invalid: %s", e)
 
-    # 3) URL (default to your prod location)
-    url = os.getenv(
-        "ECO_LOCAL_DISCOVER_PLAN_URL",
-        # You said prod will host it here; we use that as the default.
-        "/config/discover_rotation.json"
-    )
+    # 3) URL (default to a local config URL path so it works behind IAP/reverse-proxy)
+    url = os.getenv("ECO_LOCAL_DISCOVER_PLAN_URL", "/config/discover_rotation.json")
     data = _fetch_json_url(url, _PLAN_CACHE, _PLAN_TTL_SECONDS)
     if isinstance(data, dict) and data:
         return data
@@ -337,45 +377,51 @@ async def discover_rotate(
 ):
     body: Dict[str, Any] = {}
     if request.method == "POST":
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-    day_seed     = body.get("day_seed", day_seed)
-    require_email= body.get("require_email", require_email)
-    limit        = body.get("limit", limit)
-    refresh      = int(body.get("refresh", refresh or 0))
-    batch_n      = int(body.get("batch_n", batch_n))
-    dry_run      = int(body.get("dry_run", dry_run))
+        body = await _safe_json(request)
 
-    plan = _load_generator_plan(force_refresh=bool(refresh))
-    picked = _synth_queries_from_plan(plan, day_seed, batch_n)
+    # Body can override query params
+    day_seed      = body.get("day_seed", day_seed)
+    require_email = body.get("require_email", require_email)
+    limit         = body.get("limit", limit)
+    refresh       = int(body.get("refresh", refresh or 0))
+    batch_n       = int(body.get("batch_n", batch_n))
+    dry_run       = int(body.get("dry_run", dry_run))
 
-    if limit:
+    try:
+        plan = _load_generator_plan(force_refresh=bool(refresh))
+        picked = _synth_queries_from_plan(plan, day_seed, batch_n)
+        if limit:
+            for it in picked:
+                it["limit"] = int(limit)
+
+        if dry_run:
+            return {"ok": True, "source": "plan", "dry_run": True, "batch": picked}
+
+        results = {"ok": True, "source": "plan", "processed": 0, "errors": 0, "items": []}
         for it in picked:
-            it["limit"] = int(limit)
+            argv = ["discover", "--query", it["query"], "--city", it["city"], "--limit", str(it["limit"])]
+            if require_email is True:
+                argv += ["--require-email"]
+            elif require_email is False:
+                argv += ["--no-require-email"]
+            try:
+                oc.invoke(argv)
+                results["processed"] += 1
+                results["items"].append({"argv": argv, "status": "ok"})
+            except Exception as e:
+                # Log full traceback per item; continue processing others
+                log.error("[rotate] item failed argv=%s: %s\n%s", argv, e, traceback.format_exc())
+                results["errors"] += 1
+                results["items"].append({"argv": argv, "status": "error", "detail": str(e)})
 
-    if dry_run:
-        return {"ok": True, "source": "plan", "dry_run": True, "batch": picked}
-
-    results = {"ok": True, "source": "plan", "processed": 0, "errors": 0, "items": []}
-    for it in picked:
-        argv = ["discover", "--query", it["query"], "--city", it["city"], "--limit", str(it["limit"])]
-        if require_email is True:
-            argv += ["--require-email"]
-        elif require_email is False:
-            argv += ["--no-require-email"]
-        try:
-            oc.invoke(argv)
-            results["processed"] += 1
-            results["items"].append({"argv": argv, "status": "ok"})
-        except Exception as e:
-            results["errors"] += 1
-            results["items"].append({"argv": argv, "status": "error", "detail": str(e)})
-
-    results["meta"] = {
-        "batch_n": batch_n,
-        "day_seed": day_seed,
-        "refreshed": bool(refresh),
-    }
-    return results
+        results["meta"] = {
+            "batch_n": batch_n,
+            "day_seed": day_seed,
+            "refreshed": bool(refresh),
+        }
+        return results
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("[rotate] failed: %s\n%s", e, traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
