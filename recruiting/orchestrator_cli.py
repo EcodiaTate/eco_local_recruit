@@ -1,4 +1,3 @@
-# recruiting/orchestrator_cli.py
 from __future__ import annotations
 
 import argparse
@@ -10,13 +9,12 @@ from typing import Any, Dict, Optional, List, Tuple
 # ---------------- env / dotenv ----------------
 try:
     from dotenv import load_dotenv, find_dotenv
-    # Load from CWD first, then repo root (…/eco-local/.env)
+    # Load from CWD first, then repo root (…/.env)
     load_dotenv(find_dotenv(usecwd=True))
     repo_root = Path(__file__).resolve().parents[1]
     load_dotenv(repo_root / ".env", override=False)
 except Exception:
     pass  # works without python-dotenv
-
 
 # ---------------- local imports ----------------
 from . import store
@@ -33,7 +31,6 @@ from .calendar_client import _tz as _cal_tz  # type: ignore
 from .calendar_client import _build_calendar_service  # type: ignore
 from .config import settings
 from .tools import calendar_suggest_windows  # agentic, scored windows
-from . import store
 
 # ---- robust discovery-module loader (scrape/parse/qualify/profile) ----
 import importlib
@@ -47,6 +44,7 @@ import sys as _sys
 if str(APP_ROOT) not in _sys.path:
     _sys.path.insert(0, str(APP_ROOT))
 
+
 def _import_by_spec(module_name: str, file_path: Path):
     spec = importlib.util.spec_from_file_location(module_name, file_path)
     if spec is None or spec.loader is None:
@@ -54,6 +52,7 @@ def _import_by_spec(module_name: str, file_path: Path):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)  # type: ignore[attr-defined]
     return mod
+
 
 def _load_discover_modules():
     """
@@ -100,41 +99,8 @@ def _load_discover_modules():
         print(f"[discover]   strategy '{where}' error: {err}")
     raise ImportError("Failed to import discovery modules via all strategies.")
 
+
 _scrape, _parse, _qualify, _profile = _load_discover_modules()
-
-def _load_seed_helpers():
-    """
-    With /app on sys.path and seed_cli.py sitting next to main.py,
-    import it as a top-level module.
-    Falls back to store proxies if not present.
-    """
-    try:
-        # ✅ absolute, top-level import (since /app is on sys.path)
-        from seed_cli import upsert_prospect, qualify_basic  # type: ignore
-        return upsert_prospect, qualify_basic
-    except Exception:
-        # Fallback: proxy to store helpers if exposed
-        def _store_upsert_proxy(p):
-            for fname in ("upsert_prospect", "create_prospect", "upsert_or_create_prospect"):
-                fn = getattr(store, fname, None)
-                if callable(fn):
-                    return fn(p)
-            raise RuntimeError(
-                "No seed_cli and store lacks upsert helper. Provide seed_cli.upsert_prospect "
-                "or implement store.upsert_prospect/create_prospect."
-            )
-
-        def _store_qualify_proxy(node_id: str, score: float, reason: str):
-            for fname in ("qualify_basic", "set_prospect_score", "update_prospect_score"):
-                fn = getattr(store, fname, None)
-                if callable(fn):
-                    return fn(node_id, score=score, reason=reason)
-            print("[discover] qualify proxy: no store helper; skipping score update.")
-            return None
-
-        return _store_upsert_proxy, _store_qualify_proxy
-
-upsert_prospect, qualify_basic = _load_seed_helpers()
 
 # ---------------- flags ----------------
 DRY_RUN = os.getenv("DRY_RUN", "0").strip().lower() in {"1", "true", "yes", "on"}
@@ -146,62 +112,16 @@ REQUIRE_EMAIL_DEFAULT = os.getenv("ECO_LOCAL_REQUIRE_EMAIL", "1").strip().lower(
 # Pre-fit threshold for discovery acceptance (prevents low-fit upserts)
 MIN_FIT_DEFAULT = float(os.getenv("ECO_LOCAL_MIN_FIT", "0.60"))
 
-# ---------------- outreach binding ----------------
-import traceback
 import time
+import traceback
 
-def _bind_outreach(allow_fallback: bool):
-    try:
-        from . import outreach as _outreach
-
-        def _draft_first_touch(p: Dict[str, Any]) -> tuple[str, str]:
-            trace_id = f"cli-{int(time.time()*1000)}"
-            try:
-                return _outreach.draft_first_touch(p, trace_id=trace_id)
-            except TypeError:
-                return _outreach.draft_first_touch(p)
-
-        def _draft_followup(p: Dict[str, Any], attempt_no: int) -> tuple[str, str]:
-            trace_id = f"cli-{int(time.time()*1000)}"
-            try:
-                return _outreach.draft_followup(p, attempt=attempt_no, trace_id=trace_id)
-            except TypeError:
-                return _outreach.draft_followup(p, attempt=attempt_no)
-
-        return _draft_first_touch, _draft_followup, "llm"
-    except Exception as e:
-        print("\n[orchestrator] outreach import failed. Full traceback:")
-        traceback.print_exc()
-        if not allow_fallback:
-            raise RuntimeError(
-                "Failed to import recruiting.outreach (LLM drafters). "
-                "Set ECO_LOCAL_ALLOW_FALLBACK=1 or pass --allow-fallback."
-            ) from e
-
-        def _draft_first_touch_fallback(p: Dict[str, Any]) -> tuple[str, str]:
-            subj = f"Ecodia: quick intro for {p.get('name') or p.get('business_name') or 'your team'}"
-            body = (
-                "<p>Hey! We’re building local value loops in Ecodia - "
-                "youth earn ECO for real actions, then retire ECO at local businesses.</p>"
-                "<p>Would you be open to a 20–30 min intro this week?</p>"
-            )
-            return subj, body
-
-        def _draft_followup_fallback(p: Dict[str, Any], attempt_no: int) -> tuple[str, str]:
-            subj = f"Circling back - Ecodia × {p.get('name') or p.get('business_name') or 'your team'}"
-            body = (
-                "<p>Following up on my note about ECO (earn from actions → retire at local businesses). "
-                "Happy to share how it works and show live results.</p>"
-            )
-            return subj, body
-
-        return _draft_first_touch_fallback, _draft_followup_fallback, "fallback"
 
 def _today_or(v: Optional[str]) -> date:
     return date.fromisoformat(v) if v else date.today()
 
 # ---------- Small datetime helpers (CLI-only) ----------
 from typing import Optional  # ensure this import exists at top
+
 
 def _dt_local(s: Optional[str], *, default: Optional[datetime] = None) -> datetime:
     """
@@ -248,6 +168,7 @@ def _fmt_range(start: datetime, end: datetime) -> str:
         return f"{h}:{dt.minute:02d}" if dt.minute else f"{h}"
     return f"{start.strftime('%a %d %b')}, {hhmm(start)}{'am' if start.hour < 12 else 'pm'}–{hhmm(end)}{'am' if end.hour < 12 else 'pm'}"
 
+
 def _print_events(rows: List[Dict[str, Any]]) -> None:
     if not rows:
         print("  (none)")
@@ -266,6 +187,7 @@ def _print_events(rows: List[Dict[str, Any]]) -> None:
         print(f"  - {label} | {kind:9s} | {title}")
 
 # ---------- Calendar: raw freebusy ----------
+
 def _freebusy_blocks(start: datetime, end: datetime, *, calendar_id: Optional[str]) -> List[Tuple[datetime, datetime]]:
     svc = _build_calendar_service()
     cal_id = calendar_id or settings.ECO_LOCAL_GCAL_ID
@@ -304,6 +226,7 @@ def cmd_slots(args: argparse.Namespace) -> None:
     for s in suggestions[:10]:
         print(" -", _human_label(s))
 
+
 def cmd_cal_freebusy(args: argparse.Namespace) -> None:
     tz = _cal_tz()
     start = _dt_local(args.start)
@@ -316,12 +239,14 @@ def cmd_cal_freebusy(args: argparse.Namespace) -> None:
     for s, e in blocks:
         print("  -", _fmt_range(s, e), f"({(e - s).seconds//60} min)")
 
+
 def cmd_cal_check(args: argparse.Namespace) -> None:
     tz = _cal_tz()
     start = _dt_local(args.start)
     end   = _dt_local(args.end, default=(start + timedelta(days=args.days)))
     ok = is_range_free(start.isoformat(), end.isoformat(), trace_id="cli-check")
     print(f"[check] {('FREE' if ok else 'BUSY ')} :: {_fmt_range(start, end)}  tz={tz}")
+
 
 def cmd_cal_hold(args: argparse.Namespace) -> None:
     from .calendar_client import create_hold
@@ -341,6 +266,7 @@ def cmd_cal_hold(args: argparse.Namespace) -> None:
     )
     print("[hold] created:", ev.get("id"), ev.get("htmlLink"))
 
+
 def cmd_cal_thread(args: argparse.Namespace) -> None:
     tz = _cal_tz()
     start = _dt_local(args.start) if args.start else datetime.now(tz) - timedelta(days=args.back)
@@ -354,10 +280,6 @@ def cmd_cal_thread(args: argparse.Namespace) -> None:
 # ---------- Commands: outreach build/send ----------
 
 def cmd_build(args: argparse.Namespace) -> None:
-    allow_fallback = args.allow_fallback or ALLOW_FALLBACK_DEFAULT
-    draft_first, draft_follow, mode = _bind_outreach(allow_fallback)
-    print(f"[build] drafter_mode={mode} allow_fallback={allow_fallback}")
-
     run_date = _today_or(args.date)
     run = store.create_run(run_date)
 
@@ -365,7 +287,7 @@ def cmd_build(args: argparse.Namespace) -> None:
     first_prospects = store.select_prospects_for_first_touch(first_quota)
     print(f"[build] first-touch prospects: {len(first_prospects)}")
     for p in first_prospects:
-        subj, body = draft_first(p)
+        subj, body = _draft_first_touch(p)
         store.attach_draft_email(run, p, "first", subj, body)
 
     follow_days = store.get_followup_days()
@@ -373,7 +295,7 @@ def cmd_build(args: argparse.Namespace) -> None:
     print(f"[build] followup prospects: {len(follow_prospects)}")
     for p in follow_prospects:
         attempt_no = int(p.get("attempt_count", 0)) + 1
-        subj, body = draft_follow(p, attempt_no)
+        subj, body = _draft_followup(p, attempt_no)
         kind = f"followup{attempt_no}" if attempt_no < store.get_max_attempts() else "final"
         store.attach_draft_email(run, p, kind, subj, body)
 
@@ -384,6 +306,7 @@ def cmd_build(args: argparse.Namespace) -> None:
     print("[build] staged drafts:")
     for item in store.iter_run_items(run_date):
         print(f"  - {item.type:10s} | {item.email:30s} | {item.subject}")
+
 
 def cmd_send(args: argparse.Namespace) -> None:
     run_date = _today_or(args.date)
@@ -404,6 +327,7 @@ def cmd_poll_inbox(args: argparse.Namespace) -> None:
     processed = hourly_inbox_poll()
     print(f"[inbox] processed={processed}")
 
+
 def cmd_followups(args: argparse.Namespace) -> None:
     target = _today_or(args.date)
     days = store.get_followup_days()
@@ -411,6 +335,7 @@ def cmd_followups(args: argparse.Namespace) -> None:
     print(f"[followups] due on {target} for days={days}: {len(prospects)}")
     for p in prospects[:20]:
         print(f" - {p.get('email')} (attempt_count={p.get('attempt_count')})")
+
 
 def cmd_demo_inbound(args: argparse.Namespace) -> None:
     msg: Dict[str, Any] = {
@@ -430,6 +355,7 @@ def cmd_demo_inbound(args: argparse.Namespace) -> None:
     decision = triage_and_update(msg)
     print("[demo-inbound] decision:", decision)
 
+
 def cmd_cleanup_holds(args: argparse.Namespace) -> None:
     stats = cleanup_stale_holds(
         max_past_days=args.max_past_days,
@@ -437,7 +363,7 @@ def cmd_cleanup_holds(args: argparse.Namespace) -> None:
     )
     print(f"[calendar] cleanup stats={stats}")
 
-# ---------- Commands: discovery / seeding (updated with pre-fit threshold) ----------
+# ---------- Commands: discovery (store-only) ----------
 
 def _heuristic_pre_fit(parsed: Dict[str, Any], domain: Optional[str]) -> float:
     """
@@ -448,11 +374,14 @@ def _heuristic_pre_fit(parsed: Dict[str, Any], domain: Optional[str]) -> float:
     emails = list(parsed.get("emails") or [])
     best = (parsed.get("best_email") or "").lower()
     dom = (domain or "").lower().lstrip("www.")
+
     def is_freemail(e: str) -> bool:
         e = e.lower()
         return any(e.endswith(x) for x in (
-            "@gmail.com", "@outlook.com", "@hotmail.com", "@yahoo.com", "@icloud.com", "@proton.me", "@pm.me"
+            "@gmail.com", "@outlook.com", "@hotmail.com", "@yahoo.com",
+            "@icloud.com", "@proton.me", "@pm.me"
         ))
+
     def is_generic_local(e: str) -> bool:
         pref = (e.split("@",1)[0] if "@" in e else "").lower()
         return pref in {
@@ -474,10 +403,11 @@ def _heuristic_pre_fit(parsed: Dict[str, Any], domain: Optional[str]) -> float:
             if is_generic_local(best):
                 score -= 0.05
         elif is_freemail(best):
-            score += 0.00  # neutral; let post-qualify decide
+            score += 0.00  # neutral
         else:
             score += 0.10  # non-freemail but off-domain (could be vendor)
     return max(0.0, min(1.0, score))
+
 
 def _pre_fit_score(parsed: Dict[str, Any], domain: Optional[str]) -> Tuple[float, str]:
     """
@@ -494,6 +424,7 @@ def _pre_fit_score(parsed: Dict[str, Any], domain: Optional[str]) -> Tuple[float
     except Exception:
         pass
     return _heuristic_pre_fit(parsed, domain), "heuristic_pre_fit"
+
 
 def cmd_discover(args: argparse.Namespace) -> None:
     store.ensure_dedupe_constraints()  # make sure constraints exist
@@ -547,8 +478,6 @@ def cmd_discover(args: argparse.Namespace) -> None:
         # Kill switch: require email unless overridden
         if require_email and not best_email:
             skipped += 1
-            # If you still want the domain to be marked seen even when no email, uncomment below
-            # store.mark_seen_candidate(domain=domain, email=None, name=name)
             print(f"  - skip (no email): {domain or name}")
             continue
 
@@ -557,24 +486,17 @@ def cmd_discover(args: argparse.Namespace) -> None:
             deduped += 1
             continue
 
-        # Upsert prospect (include email if we have it)
-        try:
-            node = upsert_prospect(type("P", (), {
-                "name": name,
-                "email": best_email,
-                "domain": domain,
-                "city": city_,
-                "state": None,
-                "country": None,
-                "phone": None,
-                "source": "discover"
-            })())
-        except Exception as e:
-            # Make the failure extremely obvious and actionable
-            raise RuntimeError(
-                "Failed to upsert prospect. Ensure seed_cli.upsert_prospect exists OR expose a "
-                "compatible helper on store (upsert_prospect/create_prospect)."
-            ) from e
+        # Upsert prospect (include email if we have it) — STORE ONLY
+        node = store.upsert_prospect(type("P", (), {
+            "name": name,
+            "email": best_email,
+            "domain": domain,
+            "city": city_,
+            "state": None,
+            "country": None,
+            "phone": None,
+            "source": "discover"
+        })())
 
         # Immediately mark “seen” so later passes won’t re-enqueue
         store.mark_seen_candidate(domain=domain, email=best_email, name=name)
@@ -585,10 +507,12 @@ def cmd_discover(args: argparse.Namespace) -> None:
         except Exception:
             # keep at least pre-fit rather than nuking a good pre-signal
             score, reason = (max(pre_fit, 0.6), "fallback score (qualify error)")
+
+        # Persist score via STORE
         try:
-            qualify_basic(node["id"], score=score, reason=reason)
+            store.qualify_basic(node["id"], score=score, reason=reason)
         except Exception:
-            print("[discover] warn: qualify_basic missing; score not persisted")
+            print("[discover] warn: qualify_basic failed; score not persisted")
 
         # Profile node
         try:
@@ -600,6 +524,8 @@ def cmd_discover(args: argparse.Namespace) -> None:
         print(f"  - upserted: {best_email or domain or name} | pre_fit={pre_fit:.2f} | qual={score:.2f} | {reason}")
 
     print(f"[discover] done. accepted={accepted} skipped={skipped} deduped={deduped} require_email={require_email} min_fit={min_fit:.2f}")
+
+# ---------- Promotion / supersede / cancel ----------
 
 def cmd_cal_promote(args: argparse.Namespace) -> None:
     from .calendar_client import promote_hold_to_event
@@ -614,7 +540,9 @@ def cmd_cal_promote(args: argparse.Namespace) -> None:
           ((ev.get("extendedProperties") or {}).get("private") or {}).get("ecoLocalKind"),
           "|", ev.get("htmlLink"))
 
+
 # ---------- Parser ----------
+
 def _human_label(s: Dict[str, Any]) -> str:
     try:
         from datetime import datetime as _dt
@@ -636,6 +564,7 @@ def _human_label(s: Dict[str, Any]) -> str:
         bits.append(f"- {reason}")
     return " ".join(bits)
 
+
 def cmd_cal_supersede(args: argparse.Namespace) -> None:
     from .calendar_client import supersede_thread_booking
     start = _dt_local(args.start)
@@ -650,10 +579,12 @@ def cmd_cal_supersede(args: argparse.Namespace) -> None:
     )
     print("[supersede] id:", ev.get("id"), ev.get("htmlLink"))
 
+
 def cmd_cal_cancel_thread(args: argparse.Namespace) -> None:
     from .calendar_client import cancel_thread_events
     stats = cancel_thread_events(thread_id=args.thread_id, trace_id="cli-cancel-thread")
     print("[cancel-thread] stats:", stats)
+
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser("ECO Local Orchestrator CLI (idempotent)")
@@ -711,7 +642,6 @@ def build_parser() -> argparse.ArgumentParser:
     b = sub.add_parser("build", help="Build (idempotent) drafts for a run date")
     b.add_argument("--date", type=str)
     b.add_argument("--freeze", action="store_true")
-    b.add_argument("--allow-fallback", action="store_true")
     b.set_defaults(func=cmd_build)
 
     pr = sub.add_parser("cal-promote", help="Promote a HOLD to CONFIRMED and notify")
@@ -745,7 +675,7 @@ def build_parser() -> argparse.ArgumentParser:
     cl.add_argument("--no-drop-future-if-confirmed", action="store_true")
     cl.set_defaults(func=cmd_cleanup_holds)
 
-    # NEW: discovery with kill switch flag (defaults to env=ON)
+    # Discovery
     dp = sub.add_parser("discover", help="LLM-powered business discovery → parse → score → profile (with min-fit gate)")
     dp.add_argument("--query", required=True)
     dp.add_argument("--city", required=True)
@@ -757,6 +687,31 @@ def build_parser() -> argparse.ArgumentParser:
 
     return p
 
+
+# --- Drafting (store-only orchestration: keep drafters local to this file) ---
+
+def _draft_first_touch(p: Dict[str, Any]) -> tuple[str, str]:
+    """
+    Minimal first-touch email. Replace with your LLM-backed drafter if desired.
+    """
+    subj = f"Ecodia × {p.get('name') or p.get('domain') or 'your team'} — quick intro"
+    body = (
+        "<p>Hey! We’re building local value loops in Ecodia — "
+        "youth earn ECO for real actions, then retire ECO at local businesses.</p>"
+        "<p>Would you be open to a 20–30 min chat this week?</p>"
+    )
+    return subj, body
+
+
+def _draft_followup(p: Dict[str, Any], attempt_no: int) -> tuple[str, str]:
+    subj = f"Circling back — ECO Local × {p.get('name') or p.get('domain') or 'your team'}"
+    body = (
+        "<p>Following up on my note about ECO Local (earn from actions → retire at local businesses). "
+        "Happy to walk through how it works and show live results.</p>"
+    )
+    return subj, body
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -767,6 +722,7 @@ def main() -> None:
             store.close_driver()
         except Exception:
             pass
+
 
 # --- Programmatic entrypoint for Cloud Run / FastAPI ---
 def invoke(argv: list[str]) -> int:
@@ -784,6 +740,7 @@ def invoke(argv: list[str]) -> int:
             store.close_driver()
         except Exception:
             pass
+
 
 if __name__ == "__main__":
     main()

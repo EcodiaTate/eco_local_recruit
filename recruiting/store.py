@@ -1,9 +1,9 @@
-# recruiting/store.py
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from datetime import date
 from typing import Dict, Any, Iterable, List, Optional
+import re
 
 from neo4j import GraphDatabase
 from .config import settings
@@ -26,6 +26,165 @@ def _run(cy: str, params: Dict[str, Any] | None = None) -> List[Dict[str, Any]]:
     with _driver.session() as s:
         rs = s.run(cy, **(params or {}))
         return [r.data() for r in rs]
+
+
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+def _norm_email(e: Optional[str]) -> Optional[str]:
+    if not e:
+        return None
+    e = e.strip().lower()
+    return e if EMAIL_RE.match(e) else None
+
+
+def _domain_from(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    v = value.strip().lower()
+    if "@" in v:
+        v = v.split("@", 1)[1]
+    # strip scheme/path
+    v = re.sub(r"^https?://", "", v).split("/", 1)[0]
+    return v.lstrip(".") or None
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Prospect upsert / scoring
+# ──────────────────────────────────────────────────────────────────────────────
+
+def upsert_prospect(p: Any) -> Dict[str, Any]:
+    """
+    Idempotently upsert a Prospect. If email is present, MERGE by email;
+    otherwise MERGE by domain.
+
+    On CREATE we set:
+      - id=randomUUID()
+      - qualified=true
+      - qualification_score=0.90
+      - outreach_started=false
+      - attempt_count=0
+
+    Returns a dict with at least {id, email, domain, name}.
+    """
+    # Accept dataclass / object / dict
+    try:
+        data = asdict(p) if hasattr(p, "__dataclass_fields__") else {
+            "name": getattr(p, "name", None),
+            "email": getattr(p, "email", None),
+            "domain": getattr(p, "domain", None),
+            "city": getattr(p, "city", None),
+            "state": getattr(p, "state", None),
+            "country": getattr(p, "country", None),
+            "phone": getattr(p, "phone", None),
+            "source": getattr(p, "source", "seed"),
+        }
+    except Exception:
+        data = dict(p or {})
+
+    email = _norm_email(data.get("email"))
+    domain = _domain_from(data.get("domain") or email)
+    name = (data.get("name") or "").strip() or None
+    city = (data.get("city") or "").strip() or None
+    state = (data.get("state") or "").strip() or None
+    country = (data.get("country") or "").strip() or None
+    phone = (data.get("phone") or "").strip() or None
+    source = (data.get("source") or "seed").strip() or "seed"
+
+    # Ensure constraints (safe if already present)
+    try:
+        ensure_dedupe_constraints()
+    except Exception:
+        pass
+
+    if email:
+        cypher = """
+        MERGE (p:Prospect {email: $email})
+          ON CREATE SET
+            p.id                   = randomUUID(),
+            p.created_at           = datetime(),
+            p.source               = $source,
+            p.qualified            = true,
+            p.qualification_score  = 0.90,
+            p.qualification_reason = 'seed',
+            p.outreach_started     = false,
+            p.attempt_count        = 0
+          ON MATCH SET
+            p.source = coalesce(p.source, $source)
+        SET
+          p.name       = coalesce($name, p.name),
+          p.domain     = coalesce($domain, p.domain),
+          p.city       = coalesce($city, p.city),
+          p.state      = coalesce($state, p.state),
+          p.country    = coalesce($country, p.country),
+          p.phone      = coalesce($phone, p.phone),
+          p.updated_at = datetime()
+        RETURN p.id as id, p.email as email, p.domain as domain, p.name as name
+        """
+        params = {
+            "email": email,
+            "domain": domain,
+            "name": name,
+            "city": city,
+            "state": state,
+            "country": country,
+            "phone": phone,
+            "source": source,
+        }
+    elif domain:
+        cypher = """
+        MERGE (p:Prospect {domain: $domain})
+          ON CREATE SET
+            p.id                   = randomUUID(),
+            p.created_at           = datetime(),
+            p.source               = $source,
+            p.qualified            = true,
+            p.qualification_score  = 0.90,
+            p.qualification_reason = 'seed',
+            p.outreach_started     = false,
+            p.attempt_count        = 0
+          ON MATCH SET
+            p.source = coalesce(p.source, $source)
+        SET
+          p.name       = coalesce($name, p.name),
+          p.city       = coalesce($city, p.city),
+          p.state      = coalesce($state, p.state),
+          p.country    = coalesce($country, p.country),
+          p.phone      = coalesce($phone, p.phone),
+          p.updated_at = datetime()
+        RETURN p.id as id, p.email as email, p.domain as domain, p.name as name
+        """
+        params = {
+            "domain": domain,
+            "name": name,
+            "city": city,
+            "state": state,
+            "country": country,
+            "phone": phone,
+            "source": source,
+        }
+    else:
+        raise ValueError("upsert_prospect requires at least an email or a domain")
+
+    rows = _run(cypher, params) or []
+    return dict(rows[0]) if rows else {"id": None, "email": email, "domain": domain, "name": name}
+
+
+def qualify_basic(prospect_id: str, *, score: float, reason: str = "") -> Dict[str, Any]:
+    """
+    Minimal scoring helper used by the orchestrator.
+    Clamps score to [0,1], stamps reason & updated_at, sets qualified flag at 0.5+.
+    """
+    cy = """
+    MATCH (p:Prospect {id:$pid})
+    SET p.qualification_score  = toFloat($score),
+        p.qualification_reason = $reason,
+        p.qualified            = CASE WHEN toFloat($score) >= 0.5 THEN true ELSE false END,
+        p.updated_at           = datetime()
+    RETURN p { .id, .email, .domain, .qualification_score, .qualification_reason, .qualified } AS p
+    """
+    s = max(0.0, min(1.0, float(score)))
+    rs = _run(cy, {"pid": prospect_id, "score": s, "reason": reason})
+    return rs[0]["p"] if rs else {}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -415,13 +574,6 @@ def close_driver() -> None:
 # Seen registry (dedupe across discovery runs)
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _norm_email(e: Optional[str]) -> Optional[str]:
-    if not e:
-        return None
-    e = e.strip().lower()
-    return e or None
-
-
 def _norm_domain(d: Optional[str]) -> Optional[str]:
     if not d:
         return None
@@ -448,11 +600,6 @@ def ensure_dedupe_constraints() -> None:
         except Exception:
             # ignore if edition/permissions don't allow constraint ops
             pass
-
-
-# Backwards-compat shim: keep the old function name working
-def ensure_seen_constraints() -> None:
-    ensure_dedupe_constraints()
 
 
 def has_prospect(*, email: Optional[str] = None, domain: Optional[str] = None) -> bool:
