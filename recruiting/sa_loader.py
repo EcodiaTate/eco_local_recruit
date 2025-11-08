@@ -103,6 +103,8 @@ def load_sa_credentials(*, scopes: Iterable[str], subject: Optional[str] = None)
     resolving paths relative to SECRETS_DIR and supporting absolute '/secrets/...'.
     Also tries the same path with '.json' appended if the first candidate is missing.
     """
+    # inside load_sa_credentials() just before _ensure_exists_any(...)
+
     # Prefer explicit GMAIL/GCAL paths if present; they can be the same file.
     raw_path = (subject and settings.GMAIL_SA_PATH) if subject else settings.GCAL_SA_PATH
     if not raw_path:
@@ -120,6 +122,11 @@ def load_sa_credentials(*, scopes: Iterable[str], subject: Optional[str] = None)
         candidates.append(resolved + ".json")
 
     path = _ensure_exists_any(candidates, "Service Account JSON")
+    # inside load_sa_credentials() just before _ensure_exists_any(...)
+    print(f"[sa_loader] raw_path={raw_path}")
+    print(f"[sa_loader] resolved={resolved}")
+    for c in candidates:
+        print(f"[sa_loader] candidate={c} exists={os.path.exists(c)}")
 
     creds = service_account.Credentials.from_service_account_file(path, scopes=list(scopes))
     if subject:

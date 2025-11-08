@@ -125,14 +125,14 @@ def _bind_outreach(allow_fallback: bool):
         def _draft_first_touch_fallback(p: Dict[str, Any]) -> tuple[str, str]:
             subj = f"Ecodia: quick intro for {p.get('name') or p.get('business_name') or 'your team'}"
             body = (
-                "<p>Hey! We’re building local value loops in Ecodia — "
+                "<p>Hey! We’re building local value loops in Ecodia - "
                 "youth earn ECO for real actions, then retire ECO at local businesses.</p>"
                 "<p>Would you be open to a 20–30 min intro this week?</p>"
             )
             return subj, body
 
         def _draft_followup_fallback(p: Dict[str, Any], attempt_no: int) -> tuple[str, str]:
-            subj = f"Circling back — Ecodia × {p.get('name') or p.get('business_name') or 'your team'}"
+            subj = f"Circling back - Ecodia × {p.get('name') or p.get('business_name') or 'your team'}"
             body = (
                 "<p>Following up on my note about ECO (earn from actions → retire at local businesses). "
                 "Happy to share how it works and show live results.</p>"
@@ -639,7 +639,7 @@ def build_parser() -> argparse.ArgumentParser:
     hd.add_argument("--start", required=True)
     hd.add_argument("--end")
     hd.add_argument("--hold", type=int, default=30)
-    hd.add_argument("--title", default="Ecodia — intro chat (HOLD)")
+    hd.add_argument("--title", default="Ecodia - intro chat (HOLD)")
     hd.add_argument("--desc", default="Provisional hold (auto-expires unless confirmed).")
     hd.add_argument("--thread-id", required=True)
     hd.add_argument("--email")

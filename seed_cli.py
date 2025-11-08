@@ -209,14 +209,14 @@ def _seed_default() -> Dict[str, Any]:
     Seed a Prospect for tate@ecodia.au, idempotently, and give it a high score.
     """
     p = ProspectInput(
-        name="Tate",
-        email="tate@ecodia.au",
-        domain="ecodia.au",
-        city="Brisbane",
+        name="Helen",
+        email="helen.donohoe@mic.qld.edu.au",
+        domain="mic.qld.edu.au",
+        city="Sunshine Coast",
         state="QLD",
         country="AU",
         phone=None,
-        source="seed",
+        source="tate",
     )
     node = upsert_prospect(p)
     # Lift score so first-touch selection won’t filter it out.

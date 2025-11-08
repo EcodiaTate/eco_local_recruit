@@ -235,7 +235,7 @@ def thread_context(thread_id: str) -> str:
                 frm = (msg.get("from") or "").strip()
                 sub = (msg.get("subject") or "").strip()
                 snip = (msg.get("snippet") or msg.get("plain") or "").strip()
-                lines.append(f"[{when}] {frm} — {sub}\n{snip}\n")
+                lines.append(f"[{when}] {frm} - {sub}\n{snip}\n")
             return "\n".join(lines)
     except Exception:
         pass

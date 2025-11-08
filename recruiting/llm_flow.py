@@ -288,9 +288,9 @@ def _build_semantic_candidates(email: EmailEnvelope) -> List[str]:
     if {"points", "point", "currency", "eco", "token", "reward", "visits"} & kwset:
         candidates.append("ECO points system for businesses and proof of visits")
     if {"join", "sign", "onboard", "list", "offer", "partners", "business"} & kwset:
-        candidates.append("For Businesses — List an offer")
+        candidates.append("For Businesses - List an offer")
     if {"youth", "scan", "map", "redeem"} & kwset:
-        candidates.append("For Youth — Find offers nearby")
+        candidates.append("For Youth - Find offers nearby")
 
     if body_clean:
         first_sent = re.split(r"[.!?]", body_clean)[0].strip()
@@ -543,7 +543,7 @@ def _signature_block() -> str:
           </div>
           <div style="margin-top:8px; color:#777%;">
             Ecodia helps communities, youth, and partners collaborate and build regenerative futures together.
-            <br>We sometimes make mistakes — let us know at connect@ecodia.au</br>
+            <br>We sometimes make mistakes - let us know at connect@ecodia.au</br>
           </div>
         </div>
       </td>
@@ -602,7 +602,7 @@ def _exec_tool_call(call: ToolCall, tz: ZoneInfo, *, thread_id: Optional[str], e
             thread_id=thread_id,
             prospect_email=attendee_email,
             attendees=([{"email": attendee_email}] if attendee_email else []),
-            title=args.get("summary") or "Ecodia — intro chat (HOLD)",
+            title=args.get("summary") or "Ecodia - intro chat (HOLD)",
             description=args.get("description") or "Provisional hold (auto-expires unless confirmed).",
             tz=str(tz),
             send_updates="none",
@@ -612,7 +612,7 @@ def _exec_tool_call(call: ToolCall, tz: ZoneInfo, *, thread_id: Optional[str], e
     if name == "calendar.create_event":
         s = args["start_iso"]; e = args["end_iso"]
         evt = create_event(
-            title=args.get("summary") or "Ecodia — intro chat",
+            title=args.get("summary") or "Ecodia - intro chat",
             description=args.get("description") or "Looking forward to meeting you!",
             start_iso=s,
             end_iso=e,
@@ -640,7 +640,7 @@ def _exec_tool_call(call: ToolCall, tz: ZoneInfo, *, thread_id: Optional[str], e
     return name, {"error": f"tool {name} not allowed"}
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Pipeline (2-step) — with semantic_k and LLM-led confirmation
+# Pipeline (2-step) - with semantic_k and LLM-led confirmation
 # ──────────────────────────────────────────────────────────────────────────────
 
 def run_llm_flow(
@@ -668,7 +668,7 @@ def run_llm_flow(
     except Exception:
         log.exception("[llm_flow] logging semantic docs failed")
 
-    # 1) Plan — includes LLM judgment for confirmation + question detection
+    # 1) Plan - includes LLM judgment for confirmation + question detection
     a_raw = llm([_prompt_analyze_and_plan(email, tz, semantic_docs=sem_docs)])
     plan = AnalysisPlan(
         intent=a_raw.get("intent", "other"),
@@ -771,7 +771,7 @@ def run_llm_flow(
     d_raw = final_action_raw.get("draft_result", {})
     # polish the LLM html with signature + optional “times” block
     polished_html = _polish_email_html(
-        d_raw.get("html", "<p>Thanks for your note — here’s a quick summary below.</p>"),
+        d_raw.get("html", "<p>Thanks for your note - here’s a quick summary below.</p>"),
         all_available_slots
     )
     draft = DraftResult(
@@ -801,7 +801,7 @@ def run_llm_flow(
                 created_ics = build_ics(ICSSpec(
                     start=s_iso,
                     end=e_iso,
-                    summary=ev.get("summary") or "Ecodia — intro chat",
+                    summary=ev.get("summary") or "Ecodia - intro chat",
                     description=ev.get("description") or "",
                     location=booking.location_hint or "",
                     attendee_email=(email.from_addr or None),

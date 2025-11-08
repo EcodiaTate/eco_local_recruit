@@ -293,8 +293,8 @@ def _build_referral_email_html(
   <tr>
     <td style="padding:8px 24px 0 24px">
       <h1 style="font-size:20px;line-height:1.3;margin:0 0 6px 0;">Hi {to_name or business_name},</h1>
-      <p style="margin:0 0 12px 0;"><strong>{youths}</strong> asked us to invite <strong>{business_name}</strong> ({location}) to <strong>ECO Local</strong> — a youth-led, values-first network of local businesses and young regulars.</p>
-      <p style="margin:0 0 8px 0;">It’s simple: list a youth-friendly perk (discount, freebie, special) and we’ll send you real local foot traffic — not vanity metrics.{website_hint}</p>
+      <p style="margin:0 0 12px 0;"><strong>{youths}</strong> asked us to invite <strong>{business_name}</strong> ({location}) to <strong>ECO Local</strong> - a youth-led, values-first network of local businesses and young regulars.</p>
+      <p style="margin:0 0 8px 0;">It’s simple: list a youth-friendly perk (discount, freebie, special) and we’ll send you real local foot traffic - not vanity metrics.{website_hint}</p>
       <div style="margin:12px 0 8px 0;">{perks}</div>
     </td>
   </tr>

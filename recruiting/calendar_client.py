@@ -527,7 +527,7 @@ def build_ics(spec: ICSSpec) -> Tuple[str, bytes]:
 
 def create_hold(
     *,
-    title: str = "Ecodia — intro chat (HOLD)",
+    title: str = "Ecodia - intro chat (HOLD)",
     description: str = "Provisional hold (auto-expires unless confirmed).",
     start_iso: str,
     end_iso: str,
@@ -837,7 +837,7 @@ def promote_hold_to_event(
         log.info("[calendar] promote_hold_to_event: target not HOLD (kind=%s), returning as-is trace=%s", kind, trace_id)
         return target
 
-    target["summary"] = new_title or target.get("summary") or "Ecodia — intro chat"
+    target["summary"] = new_title or target.get("summary") or "Ecodia - intro chat"
     target.setdefault("transparency", "opaque")
     target.setdefault("extendedProperties", {}).setdefault("private", {})["ecoLocalKind"] = "CONFIRMED"
     if ensure_attendee_email:

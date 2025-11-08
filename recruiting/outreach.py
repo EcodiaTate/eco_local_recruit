@@ -24,7 +24,7 @@ MAX_ATTEMPTS = int(os.getenv("ECO_LOCAL_MAX_ATTEMPTS", "3"))
 
 GOAL = (
     "Our mission is to connect with amazing local businesses (like this prospect!) who genuinely care about their community and the future. "
-    "We're not just another app or a discount platform. We're trying to build a real 'local value loop'—where young people (16-30s) "
+    "We're not just another app or a discount platform. We're trying to build a real 'local value loop' - where young people (16-30s) "
     "who are passionate about sustainability and local impact can find and support businesses that share those values. "
     "Your main goal is to send a *personal invitation* to see if they want to be part of this. "
     "It's not a hard sell. It's a 'hey, we love what you're doing, we've got this thing we're building with local youth, and it feels like you'd be a perfect fit.' "
@@ -372,7 +372,7 @@ def draft_first_touch(prospect: Dict[str, Any], *, trace_id: Optional[str] = Non
     raw = generate_json(json.dumps(prompt, default=_json_default))
     subj, html = _coerce_subject_html(
         raw,
-        (f"Let’s connect, {prospect.get('name')}" if prospect.get("name") else "ECO Local — a simple invite")
+        (f"Let’s connect, {prospect.get('name')}" if prospect.get("name") else "ECO Local - a simple invite")
     )
     subj = _subject_guard(subj, attempt=1, max_attempts=MAX_ATTEMPTS)
     return subj, _polish(html, slots)

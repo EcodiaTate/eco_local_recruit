@@ -2,29 +2,21 @@
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app \
-    # optional: keep browsers in a predictable path
-    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
-
-# OS deps (Playwright will pull most libs with --with-deps)
+COPY static ./static
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl ca-certificates \
-    # helpful for font/rendering stability
-    fonts-liberation fonts-noto-color-emoji \
- && rm -rf /var/lib/apt/lists/*
+     curl ca-certificates && rm -rf /var/lib/apt/lists/*
 
-# Python deps (must include `playwright`)
+# 1) Install Python deps
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Chromium + required system libs
-RUN python -m playwright install --with-deps chromium
+# 2) Copy application code
+COPY recruiting ./recruiting
+COPY main.py .
 
-# App code
-COPY . .
-
+# 3) Run the app
 EXPOSE 8080
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]

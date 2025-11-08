@@ -158,7 +158,7 @@ def _chat_once(
         return obj, finish, req_id, None, None
 
     except BadRequestError as e:
-        # True 4xx client error — do NOT retry this mode; pivot immediately.
+        # True 4xx client error - do NOT retry this mode; pivot immediately.
         status = getattr(getattr(e, "response", None), "status_code", 400)
         detail = getattr(e, "message", str(e))
         log.info("[llm] 400 BadRequest json_mode=%s model=%s: %s", json_mode, model, detail)
@@ -244,7 +244,7 @@ def generate_json(
                 return o2 or o
             return o
         attempts += 1
-        # Only back off for transient cases; 4xx in plain mode usually means prompt issue — but still bail quickly.
+        # Only back off for transient cases; 4xx in plain mode usually means prompt issue - but still bail quickly.
         if status and 400 <= status < 500:
             break
         time.sleep(backoff)
