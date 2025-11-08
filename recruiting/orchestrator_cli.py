@@ -10,7 +10,7 @@ from typing import Any, Dict, Optional, List, Tuple
 # ---------------- env / dotenv ----------------
 try:
     from dotenv import load_dotenv, find_dotenv
-    # Load from CWD first, then repo root (…/eco_local/.env)
+    # Load from CWD first, then repo root (…/eco-local/.env)
     load_dotenv(find_dotenv(usecwd=True))
     repo_root = Path(__file__).resolve().parents[1]
     load_dotenv(repo_root / ".env", override=False)
@@ -19,9 +19,9 @@ except Exception:
 
 # ---------------- sys.path shim (run-as-script friendliness) ----------------
 import sys as _sys
-_pkg_dir = Path(__file__).resolve().parents[1]   # .../eco_local
+_pkg_dir = Path(__file__).resolve().parents[1]   # .../eco-local
 _repo_dir = _pkg_dir.parent                      # .../
-if _pkg_dir.name == "eco_local" and str(_repo_dir) not in _sys.path:
+if _pkg_dir.name == "eco-local" and str(_repo_dir) not in _sys.path:
     _sys.path.insert(0, str(_repo_dir))
 
 # ---------------- local imports ----------------

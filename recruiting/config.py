@@ -7,7 +7,7 @@ from pathlib import Path
 def _app_root() -> Path:
     """
     Resolve the project root (directory that contains .env, app.py, secrets/).
-    Default: two levels up from this file, e.g. D:/EcodiaOS/eco_local
+    Default: two levels up from this file, e.g. D:/EcodiaOS/eco-local
     Override with ECO_LOCAL_APP_ROOT if needed.
     """
     override = os.getenv("ECO_LOCAL_APP_ROOT")
@@ -55,7 +55,7 @@ class Settings:
     ECO_LOCAL_REPLY_TO: str = os.getenv("ECO_LOCAL_REPLY_TO", "ECOLocal@ecodia.au")
     UNSUB_BASE_URL: str = os.getenv(
         "UNSUB_BASE_URL",
-        "https://ecodia.au/eco_local/business/unsubscribe",
+        "https://ecodia.au/eco-local/business/unsubscribe",
     )
 
     # Gmail/Calendar SA impersonation

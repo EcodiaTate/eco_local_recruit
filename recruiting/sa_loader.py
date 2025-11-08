@@ -112,7 +112,7 @@ def load_sa_credentials(*, scopes: Iterable[str], subject: Optional[str] = None)
 
     # Still not set? default to a sensible filename under secrets_dir
     if not raw_path:
-        raw_path = "secrets/eco_local-recruit-sa"  # no suffix required; we'll try with and without .json
+        raw_path = "secrets/eco-local-recruit-sa"  # no suffix required; we'll try with and without .json
 
     resolved = _resolve_path(raw_path)
 

@@ -122,7 +122,7 @@ def readyz() -> Dict[str, Any]:
     return {"ok": True, "ts": time.time()}
 
 # ---------------- Outreach (build/send) ----------------
-@app.post("/eco_local/recruit/outreach/build")
+@app.post("/eco-local/recruit/outreach/build")
 def outreach_build(
     date_iso: str | None = None,
     freeze: bool = True,
@@ -142,7 +142,7 @@ def outreach_build(
         log.error("[outreach/build] failed: %s\n%s", e, traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/eco_local/recruit/outreach/send")
+@app.post("/eco-local/recruit/outreach/send")
 def outreach_send(date_iso: str | None = None):
     argv = ["send"]
     if date_iso:
@@ -155,7 +155,7 @@ def outreach_send(date_iso: str | None = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ---------------- Simple discover proxy ----------------
-@app.post("/eco_local/recruit/discover")
+@app.post("/eco-local/recruit/discover")
 async def discover(req: Request):
     body = await _safe_json(req)
     query = body.get("query")
@@ -178,13 +178,13 @@ async def discover(req: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ---------------- Inbox ----------------
-@app.post("/eco_local/recruit/inbox/poll")
+@app.post("/eco-local/recruit/inbox/poll")
 def poll_inbox() -> Dict[str, int]:
     processed = hourly_inbox_poll()
     return {"processed": processed}
 
 # ---------------- Webhook ----------------
-@app.post("/eco_local/recruit/signup/webhook")
+@app.post("/eco-local/recruit/signup/webhook")
 async def signup_webhook(req: Request) -> Dict[str, bool]:
     payload = await _safe_json(req)
     from recruiting.store import mark_signup_payload
@@ -365,7 +365,7 @@ def _synth_queries_from_plan(plan: Dict[str, Any], day_seed: Optional[str], batc
     return batch
 
 # single-stream endpoint
-@app.api_route("/eco_local/recruit/discover/rotate", methods=["GET", "POST"])
+@app.api_route("/eco-local/recruit/discover/rotate", methods=["GET", "POST"])
 async def discover_rotate(
     request: Request,
     day_seed: str | None = Query(default=None, description="ISO date seed, e.g. 2025-11-07"),

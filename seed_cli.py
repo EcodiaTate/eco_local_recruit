@@ -18,7 +18,7 @@ except Exception:
     pass
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Local imports (seed_cli.py lives in /eco_local)
+# Local imports (seed_cli.py lives in /eco-local)
 # ──────────────────────────────────────────────────────────────────────────────
 # Use relative package imports so this works when invoked as:
 #   python -m eco_local.seed_cli
