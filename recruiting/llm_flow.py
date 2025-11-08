@@ -687,7 +687,7 @@ def run_llm_flow(
 
     # 2b) Compute unsubscribe artifacts (URL + headers)
     to_addr_bare = _bare_email(email.to_addr)
-    unsubscribe_url = build_unsub_url(to_addr_bare) if to_addr_bare else None
+    unsubscribe_url = build_unsub_url(email=to_addr_bare) if to_addr_bare else None
     list_unsub_headers = build_list_unsub_headers(to_addr_bare) if to_addr_bare else {}
 
     # polish the LLM html with signature (incl. unsubscribe) + optional “times” block

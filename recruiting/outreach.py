@@ -408,7 +408,7 @@ def draft_first_touch(prospect: Dict[str, Any], *, trace_id: Optional[str] = Non
         "policy": {"confirmations": "do-not-confirm-meetings", "tone": "inspired-community-builder"},
         # Expanded bans to prevent “Join…” / hypey subjects
         "banned_subject_words": ["Final", "Fwd", "Re:", "Free", "Act now", "Last chance",
-                                 "Join", "join", "Movement", "movement", "Sustainable", "Future", "!"],
+                                 "Join", "join", "Movement", "movement", "Sustainable", "!"],
     }
 
     try:
