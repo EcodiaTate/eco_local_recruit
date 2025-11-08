@@ -36,6 +36,8 @@ if not logging.getLogger().handlers:
 
 Json = Dict[str, Any]
 LLMFn = Callable[[Any], Dict[str, Any]]  # accepts str OR list prompt (our _gen_json supports both)
+# Contact phone injected into event descriptions (LLM can also ask for theirs)
+CONTACT_PHONE = os.getenv("ECO_LOCAL_SENDER_PHONE", "0404247153").strip()
 
 
 @dataclass
@@ -346,7 +348,6 @@ def _prompt_analyze_and_plan(env: EmailEnvelope, tz: str, *, semantic_docs: List
     }
     return {"system": system, "user": user}
 
-
 def _prompt_coordinator_action(
     env: EmailEnvelope,
     plan: AnalysisPlan,
@@ -357,11 +358,17 @@ def _prompt_coordinator_action(
     user_confirmed: bool,
     has_questions: bool,
 ) -> Dict[str, Any]:
+    # NEW ALIGNED SYSTEM PROMPT
     system = (
-        "You are Ecodia, a warm community facilitator. Be clear, natural, and useful.\n"
-        "Answer questions only from provided facts. Return JSON only."
+        "You are Ecodia, the same warm, passionate, and slightly rebellious community builder from our first email. This is a *conversation*, not a transaction.\n"
+        "The person you're replying to is already engaged. Your goal is to be the *perfect facilitator*—keep the natural, casual, and inspired vibe going. You're not a person, but you are personal and helpful.\n"
+        "Never use corporate clichés or sound like a robot. Avoid em dashes.\n"
+        "If they have questions, answer them clearly using *only* the provided `semantic_context` facts. Don't make things up.\n"
+        "If they're booking a time, your job is to make the handoff to our founder, Tate, feel simple and human. Be helpful, confirm the details, and make it clear you're (Ecodia, the AI) setting up the chat with him (the human).\n"
+        "Return JSON only."
     )
 
+    # NEW ALIGNED USER PROMPT
     user = {
         "timezone": tz,
         "current_time_context": _now_plus_7_days(ZoneInfo(tz)),
@@ -377,10 +384,24 @@ def _prompt_coordinator_action(
         },
         "user_confirmed": bool(user_confirmed),
         "has_questions": bool(has_questions),
+        # --- NEWLY ADDED/UPDATED ---
+        "response_requirements": {
+            "must_do": [
+                "Always be clear what the next step is. Don't just be friendly, be *helpful*. Make it clear you're offering ECO Local, a way to connect with values-aligned youth."
+            ],
+            "meeting_rules": [
+                "If action is 'hold' or 'event', add a short `event_description_append` asking for them to shoot over their best phone number, especially if the chat is a call and throw it in the event description. "
+                "Include that Tate's number is 0404247153 if they want to get in contact beforehand.",
+            ],
+            "info_rules": [],
+            "confirmation_rules": []
+        },
         "ask": [
-            "1) Decide booking action. If scheduling, set `meeting_type` ('call' or 'meeting') and `location_hint` (business).",
-            "2) Draft friendly reply.",
+            "1) Ensure day/date correctness.",
+            "2) List IDs of any `semantic_context.docs` you actually used.",
+            "3) Be warm, natural, and helpful. You are Ecodia, the community facilitator. Your job is to make this process feel easy and inspiring."
         ],
+        # --- END OF UPDATE ---
         "return_format": {
             "type": "object",
             "properties": {
@@ -401,7 +422,12 @@ def _prompt_coordinator_action(
                 },
                 "draft_result": {
                     "type": "object",
-                    "properties": {"subject": {"type": "string"}, "html": {"type": "string"}},
+                    "properties": {
+                        "subject": {"type": "string"},
+                        "html": {"type": "string"},
+                        # NEW: short, plain text to append into the calendar event description
+                        "event_description_append": {"type": ["string", "null"]}
+                    },
                     "required": ["subject", "html"]
                 },
                 "facts_used": {"type": "array", "items": {"type": "string"}}
@@ -436,6 +462,7 @@ def _render_times_block(slots: List[CandidateSlot]) -> str:
         f"<ul>{items}</ul>"
         "</div>"
     )
+
 def _unsubscribe_block(to_email: Optional[str]) -> str:
     mailto = os.getenv("ECO_LOCAL_REPLY_TO", "") or "ecolocal@ecodia.au"
     url = ""
@@ -475,7 +502,7 @@ def _signature_block(to_email: Optional[str]) -> str:
             <a href="mailto:ecolocal@ecodia.au" style="color:#7fd069; text-decoration:none;">ecolocal@ecodia.au</a>
           </div>
           <div style="margin-top:8px; color:#777;">
-            Ecodia helps communities, youth, and partners collaborate and build regenerative futures together.
+            Ecodia is communities, youth, and partners creating regenerative futures together.
           </div>
           { _unsubscribe_block(to_email) }
         </div>
@@ -500,6 +527,17 @@ def _polish_email_html(html: str, slots: List[CandidateSlot], to_email: Optional
         if times_html:
             out = out.replace("<!--ECOL_SIGNATURE_START-->", times_html + "\n<!--ECOL_SIGNATURE_START-->")
     return out
+
+# ─────────────────────────────────────────────────────────────────────────────-
+# Event description merge helper
+# ─────────────────────────────────────────────────────────────────────────────-
+
+def _merge_event_description(base: str, llm_append: Optional[str]) -> str:
+    """Compose the final event description with a consistent phone/request line."""
+    base = (base or "").strip()
+    extra = (llm_append or "").strip()
+    lines = [ln for ln in [base, extra] if ln]
+    return "\n".join(lines)
 
 # ─────────────────────────────────────────────────────────────────────────────-
 # Tool executor
@@ -684,6 +722,7 @@ def run_llm_flow(
         internal_notes=b_raw.get("internal_notes"),
     )
     d_raw = final_action_raw.get("draft_result", {})
+    event_desc_append = (d_raw.get("event_description_append") or "").strip() or None  # NEW
 
     # 2b) Compute unsubscribe artifacts (URL + headers)
     to_addr_bare = _bare_email(email.to_addr)
@@ -711,14 +750,16 @@ def run_llm_flow(
             loc = booking.location_hint or ""
 
             if booking.action == "hold":
+                base_desc = "Provisional hold (auto-expires unless confirmed)."
+                desc = _merge_event_description(base_desc, event_desc_append)
                 ev = create_hold(
                     start_iso=s_iso,
                     end_iso=e_iso,
                     thread_id=email.thread_id or None,
                     prospect_email=email.from_addr or None,
                     attendees=[{"email": _bare_email(email.from_addr)}] if email.from_addr else [],
-                    title="ECO Local intro chat (HOLD)",
-                    description="Just a hold till we lock it in.",
+                    title="ECO Local intro chat (hold)",
+                    description=desc,
                     tz=tz,
                     send_updates="none",
                     meeting_type=mt or None,
@@ -728,7 +769,7 @@ def run_llm_flow(
                     start=s_iso,
                     end=e_iso,
                     summary=ev.get("summary") or ("Ecodia - intro chat – Call" if mt == "call" else "Ecodia - intro chat"),
-                    description=ev.get("description") or "",
+                    description=desc,
                     location=loc or "",
                     attendee_email=(email.from_addr or None),
                     method="REQUEST",
@@ -736,9 +777,11 @@ def run_llm_flow(
                 log.info("Created HOLD + ICS(REQUEST) for %s", s_iso)
 
             elif booking.action == "event":
+                base_desc = "Looking forward to our chat!"
+                desc = _merge_event_description(base_desc, event_desc_append)
                 create_event(
                     title="ECO Local intro chat",
-                    description="Looking forward to our chat! Let me know if you've got any questions beforehand.",
+                    description=desc,
                     start_iso=s_iso,
                     end_iso=e_iso,
                     tz=tz,

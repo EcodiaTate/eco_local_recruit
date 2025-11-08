@@ -32,7 +32,7 @@ GOAL = (
     "It's not a hard sell. It's a 'hey, we love what you're doing, and it feels like you'd be a perfect fit for the community we're building.' "
     "Make them feel *seen* and *invited*, not 'marketed to'. The vibe is community-building. "
     "The best next steps are for them to signup using the links below or for them to have a quick human intro chat. "
-    "**The core offer is a personal chat with our founder, Tate.** "
+    "**The core offer is a personal meetup or call with our founder, Tate.** "
     "They can just reply to this email, and you'll set it up. "
     "If they're super keen and want to self-serve, they can also learn more (https://ecodia.au/eco-local) or join directly (https://ecodia.au/join)."
 )
