@@ -1,9 +1,11 @@
+# recruiting/store.py
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
-from datetime import date
+from datetime import date, datetime
 from typing import Dict, Any, Iterable, List, Optional
 import re
+import os
 
 from neo4j import GraphDatabase
 from .config import settings
@@ -225,13 +227,16 @@ def select_prospects_for_first_touch(limit: int) -> list[Dict[str, Any]]:
 
 def select_prospects_for_followups(target: date, followup_days: list[int]) -> list[Dict[str, Any]]:
     """
-    LEGACY SELECTOR (kept for backwards compatibility).
-
     Select prospects where the next follow-up is due on `target`.
-    If p.next_followup_at exists, we use that.
-    Otherwise, we emulate the schedule using last_outreach_at + days[attempt_count].
 
-    NOTE: Prefer list_followups_due() for robust datetime-based selection.
+    Rules:
+    - If p.next_followup_at exists, we use that (date equality to target).
+    - Otherwise, we derive a due date from last_outreach_at + days[idx],
+      where idx = max(attempt_count - 1, 0). This means:
+        attempt_count=1 (first touch sent)  -> use days[0]
+        attempt_count=2                     -> use days[1]
+        …
+      If idx >= len(days), we clamp to the last delay in the schedule.
     """
     cy = """
     WITH date($t) AS tgt, $days AS days
@@ -242,15 +247,27 @@ def select_prospects_for_followups(target: date, followup_days: list[int]) -> li
       AND p.email IS NOT NULL
       AND coalesce(p.attempt_count, 0) < $max_attempts
     WITH p, tgt, days, coalesce(p.attempt_count,0) AS a
-    // If explicit next_followup_at is set, prefer it (date equality to the target)
+
     WITH p, tgt, days, a,
          (p.next_followup_at IS NOT NULL) AS has_next,
-         (CASE WHEN p.next_followup_at IS NOT NULL
-               THEN date(datetime(p.next_followup_at))
-               ELSE date(datetime(p.last_outreach_at)) + duration({days: toInteger(
-                        CASE WHEN a < size(days) THEN days[a] ELSE days[size(days)-1] END
-                    )})
-          END) AS due_date
+         CASE WHEN a <= 0 THEN 0 ELSE a - 1 END AS idx
+
+    WITH p, tgt,
+         CASE
+           WHEN has_next
+             THEN date(datetime(p.next_followup_at))
+           ELSE
+             date(datetime(p.last_outreach_at)) +
+             duration({
+               days: toInteger(
+                 CASE
+                   WHEN idx < size(days) THEN days[idx]
+                   ELSE days[size(days)-1]
+                 END
+               )
+             })
+         END AS due_date
+
     WHERE due_date = tgt
     RETURN p
     """
@@ -284,7 +301,7 @@ def list_followups_due(max_attempts: int, followup_days_csv: str) -> List[Dict[s
     ORDER BY p.next_followup_at ASC
     LIMIT 500
     """
-    return _run(cy, {"maxA": int(max_attempts)})
+    return [r["p"] for r in _run(cy, {"maxA": int(max_attempts)})]
 
 
 def mark_followup_sent(email: str, followup_days_csv: str) -> Dict[str, Any]:
@@ -292,19 +309,31 @@ def mark_followup_sent(email: str, followup_days_csv: str) -> Dict[str, Any]:
     Increments attempt_count, stamps last_outreach_at, and computes the next_followup_at
     using the follow-up schedule defined in followup_days_csv (e.g. "3,7,14").
 
-    If attempts reach the end of the schedule, next_followup_at is set to NULL.
+    FIX: list comprehension syntax corrected to `[x IN list | expr]`.
     """
     cy = """
-    WITH datetime() AS now, split($days_csv, ",") AS days
+    WITH datetime() AS now, split($days_csv, ",") AS raw
+    // sanitize → ints; drop blanks/whitespace
+    WITH now, [x IN raw WHERE trim(x) <> ""] AS days_txt
+    WITH now, [x IN days_txt | toInteger(trim(x))] AS days
+
     MATCH (p:Prospect {email:$email})
-    WITH p, now, coalesce(p.attempt_count,0) AS a, days
-    WITH p, now, a,
-         toInteger(days[CASE WHEN a < size(days) THEN a ELSE size(days)-1 END]) AS addDays
-    SET p.attempt_count   = a + 1,
+    WITH p, now, days, coalesce(p.attempt_count,0) AS a
+
+    // For attempt index a (0-based), schedule offset days[min(a, size-1)].
+    WITH p, now, days, a,
+         CASE
+           WHEN size(days) = 0 THEN NULL
+           WHEN a < size(days) THEN toInteger(days[a])
+           ELSE toInteger(days[size(days)-1])
+         END AS addDays
+
+    SET p.attempt_count    = a + 1,
         p.last_outreach_at = now,
         p.updated_at       = now,
         p.outreach_started = true,
         p.next_followup_at = CASE
+                               WHEN size(days) = 0 THEN NULL
                                WHEN a + 1 >= size(days) THEN NULL
                                ELSE now + duration({days:addDays})
                              END
@@ -380,8 +409,10 @@ def mark_sent(item: RunItem, message_id: str) -> None:
     """
     - Mark draft as sent
     - Upsert a Thread keyed by (email)
-    - Update Prospect: outreach_started, attempt_count += 1, last_outreach_at = now
-      (NOTE: Follow-up scheduling should call mark_followup_sent() afterwards.)
+    - Update Prospect: outreach_started, last_outreach_at = now
+      IMPORTANT: Do NOT increment attempt_count here.
+      The send pipeline should call mark_followup_sent() AFTER this,
+      which handles increment + next_followup_at in one place.
     """
     cy = """
     // 1) Mark draft
@@ -398,17 +429,14 @@ def mark_sent(item: RunItem, message_id: str) -> None:
         t.last_outbound_at   = datetime()
     MERGE (m)-[:IN_THREAD]->(t)
 
-    // 3) Update Prospect (basic stamps)
+    // 3) Update Prospect (basic stamps ONLY — no attempt_count here)
     WITH m, t
     MATCH (p:Prospect {email: m.email})
     SET p.outreach_started = true,
-        p.attempt_count    = coalesce(p.attempt_count, 0) + 1,
         p.last_outreach_at = datetime(),
         p.updated_at       = datetime()
     """
     _run(cy, {"email": item.email, "subject": item.subject, "mid": message_id})
-    # Intentionally do NOT compute next_followup_at here; caller should invoke mark_followup_sent()
-    # with the configured schedule so both first and follow-up emails share one path.
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -579,6 +607,15 @@ def _norm_domain(d: Optional[str]) -> Optional[str]:
         return None
     d = d.strip().lower()
     return d[4:] if d.startswith("www.") else d
+
+
+def ensure_followup_props() -> None:
+    cy = """
+    MATCH (p:Prospect)
+    SET p.next_followup_at = coalesce(p.next_followup_at, null),
+        p.attempt_count    = coalesce(p.attempt_count, 0)
+    """
+    _run(cy)
 
 
 def ensure_dedupe_constraints() -> None:

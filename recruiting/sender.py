@@ -8,7 +8,8 @@ import uuid
 import socket
 import pathlib
 import logging
-from typing import List, Tuple, Optional, Dict, Union
+import urllib.parse
+from typing import List, Tuple, Optional, Dict, Union, Mapping
 from email.message import EmailMessage
 from email.utils import parseaddr
 
@@ -69,6 +70,24 @@ def _coerce_ics(ics: Optional[Union[Tuple[str, bytes], object]]) -> Optional[Tup
         except Exception:
             return None
     return None
+# recruiting/sender.py  (only the changed parts shown; replace the helper)
+from .unsub_links import build_unsub_url  # NEW
+
+def _default_list_unsub_values(to_email: str) -> tuple[Optional[str], Optional[str]]:
+    """
+    Produce RFC-compliant List-Unsubscribe values.
+    URL is a signed one-click link; mailto falls back to reply-to or sender.
+    """
+    url = None
+    try:
+        url = build_unsub_url(email=to_email, thread_id=None)  # signed: e,ts,sig
+    except Exception:
+        url = None
+
+    mailto_target = getattr(settings, "ECO_LOCAL_REPLY_TO", None) or settings.SES_SENDER_EMAIL
+    mailto = f"mailto:{mailto_target}?subject=unsubscribe"
+    return url, mailto
+
 
 # ─────────────────────────────────────────────────────────
 # MIME construction
@@ -106,6 +125,9 @@ def _build_mime(
     reply_to_message_id: Optional[str],
     references: Optional[List[str]],
     ics: Optional[Union[Tuple[str, bytes], object]],
+    list_unsubscribe_url: Optional[str] = None,
+    list_unsubscribe_mailto: Optional[str] = None,
+    extra_headers: Optional[Mapping[str, str]] = None,   # ← NEW: arbitrary custom headers
 ) -> bytes:
     """
     Build a message with:
@@ -115,6 +137,10 @@ def _build_mime(
             - inline images (Content-ID)
           (else) multipart/alternative directly under root
         - attachments (incl. optional ICS)
+
+    Adds RFC-compliant List-Unsubscribe headers:
+      List-Unsubscribe: <https://...>, <mailto:...>
+      List-Unsubscribe-Post: List-Unsubscribe=One-Click (only when https URL exists)
     """
     root = EmailMessage()
     root["Subject"] = subject
@@ -125,6 +151,7 @@ def _build_mime(
 
     root["Message-ID"] = _make_message_id(settings.SES_SENDER_EMAIL)
 
+    # Threading headers
     if reply_to_message_id and "@" in reply_to_message_id:
         root["In-Reply-To"] = f"<{reply_to_message_id.strip('<>')}>"
     if references:
@@ -136,14 +163,44 @@ def _build_mime(
         if refs_norm:
             root["References"] = refs_norm
 
+    # List-Unsubscribe headers
+    bare_to = _bare(to)
+    url, mailto = (
+        (list_unsubscribe_url, list_unsubscribe_mailto)
+        if (list_unsubscribe_url or list_unsubscribe_mailto)
+        else _default_list_unsub_values(bare_to)
+    )
+    parts = []
+    if url:
+        parts.append(f"<{url}>")
+    if mailto:
+        parts.append(f"<{mailto}>")
+    if parts:
+        # Avoid duplicates; overwrite if already present via extra_headers
+        if root.get("List-Unsubscribe"):
+            del root["List-Unsubscribe"]
+        root["List-Unsubscribe"] = ", ".join(parts)
+        # One-click only valid with HTTPS URL endpoint
+        if url:
+            if root.get("List-Unsubscribe-Post"):
+                del root["List-Unsubscribe-Post"]
+            root["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
+
+    # Apply any caller-supplied custom headers last (can overwrite above intentionally)
+    if extra_headers:
+        for k, v in extra_headers.items():
+            if not k:
+                continue
+            if root.get(k):
+                del root[k]
+            root[k] = str(v)
+
     root.make_mixed()
 
     # multipart/alternative (text/plain + text/html)
     alt = EmailMessage()
-    # light plain fallback
     alt.set_content("This email includes an HTML version.", charset="utf-8")
-
-    # IMPORTANT: send HTML as base64 to avoid quoted-printable line folding inside attributes
+    # Send HTML as base64 to avoid quoted-printable damage to attributes
     alt.add_alternative(html or "<html></html>", subtype="html", charset="utf-8", cte="base64")
 
     if inline_images:
@@ -176,19 +233,16 @@ def _build_mime(
             maintype, subtype = guessed.split("/", 1)
 
             img_part = EmailMessage()
-            # Use base64 for binary
             img_part.set_content(
                 data,
                 maintype=maintype,
                 subtype=subtype,
                 cte="base64",
             )
-            # Make sure there is only one Content-Disposition header, set to inline
+            # Ensure single Content-Disposition header, set to inline
             if img_part.get("Content-Disposition"):
                 del img_part["Content-Disposition"]
-            # Keep a filename only to help some clients show “download” if they detach, but not required
             img_part.add_header("Content-Disposition", "inline", filename=(path or f"{cid}.img"))
-
             img_part.add_header("Content-ID", f"<{cid}>")
             img_part.add_header("Content-Location", f"cid:{cid}")
             img_part.add_header("X-Attachment-Id", cid)
@@ -227,18 +281,27 @@ def send_email(
     reply_to_message_id: Optional[str] = None,
     references: Optional[List[str]] = None,
     ics: Optional[Union[Tuple[str, bytes], object]] = None,
+    # Allow callers to force specific List-Unsubscribe values
+    list_unsubscribe_url: Optional[str] = None,
+    list_unsubscribe_mailto: Optional[str] = None,
+    # NEW: arbitrary additional headers (e.g., X-Campaign, List-ID, etc.)
+    extra_headers: Optional[Mapping[str, str]] = None,
 ) -> str:
     """
     Send via SES.
-    - Raw path for anything that needs threading/attachments/ICS/inline images.
-    - Simple path for HTML-only mail.
+    - Raw path for anything that needs threading/attachments/ICS/inline images/custom headers.
+    - Simple path for HTML-only mail (note: cannot stamp custom headers on simple path).
+    Adds List-Unsubscribe headers automatically if possible.
     """
     try:
         bare_to = _bare(to)
         cfg_set = os.getenv("SES_CONFIGURATION_SET")
         bcc_debug = os.getenv("ECO_LOCAL_BCC_DEBUG")
 
-        if inline_images or attachments or reply_to_message_id or references or ics:
+        use_raw = bool(inline_images or attachments or reply_to_message_id or references or ics or extra_headers
+                       or list_unsubscribe_url or list_unsubscribe_mailto)
+
+        if use_raw:
             raw = _build_mime(
                 to=to,
                 subject=subject,
@@ -248,6 +311,9 @@ def send_email(
                 reply_to_message_id=reply_to_message_id,
                 references=references,
                 ics=ics,
+                list_unsubscribe_url=list_unsubscribe_url,
+                list_unsubscribe_mailto=list_unsubscribe_mailto,
+                extra_headers=extra_headers,
             )
             kwargs: Dict[str, Union[str, Dict, List]] = {
                 "Source": settings.SES_SENDER_EMAIL,
@@ -273,6 +339,7 @@ def send_email(
                     [settings.ECO_LOCAL_REPLY_TO] if getattr(settings, "ECO_LOCAL_REPLY_TO", None) else []
                 ),
             }
+            # NB: Simple path cannot set custom headers, so List-Unsubscribe will only be present on the raw path.
             if cfg_set:
                 kwargs2["ConfigurationSetName"] = cfg_set
             resp = _ses.send_email(**kwargs2)

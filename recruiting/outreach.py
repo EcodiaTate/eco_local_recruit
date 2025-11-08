@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Dict, Any, Tuple, List, Optional
 import json
 import os
+import re
 from datetime import datetime, timedelta, timezone
 
 from .llm_client import generate_json
@@ -11,7 +12,8 @@ from .tools import (
     thread_context,
     calendar_suggest_windows,   # scored non-binding windows
 )
-from .branding import header_logo_src_email  # <- email-safe (https/data) logo src
+from .branding import header_logo_src_email  # email-safe (https/data) logo src
+from .unsub_links import build_unsub_url     # unsubscribe URL builder
 
 SENDER_NAME = os.getenv("ECO_LOCAL_SENDER_NAME", "Ecodia")
 SENDER_TITLE = os.getenv("ECO_LOCAL_SENDER_TITLE", "Ecodia")
@@ -23,43 +25,39 @@ LOGO_SRC = header_logo_src_email()
 MAX_ATTEMPTS = int(os.getenv("ECO_LOCAL_MAX_ATTEMPTS", "3"))
 
 GOAL = (
-    "Our mission is to connect with amazing local businesses (like this prospect!) who genuinely care about their community and the future. "
-    "We're not just another app or a discount platform. We're trying to build a real 'local value loop' - where young people (16-30s) "
-    "who are passionate about sustainability and local impact can find and support businesses that share those values. "
+    "Our mission is to find and connect with amazing local businesses (like this prospect!) who are genuinely building a better future. "
+    "We're a movement building 'ECO Local', real 'local value loops' where young people (16-30s) "
+    "who are *actively looking* for sustainable and community-focused businesses can find and support them. "
     "Your main goal is to send a *personal invitation* to see if they want to be part of this. "
-    "It's not a hard sell. It's a 'hey, we love what you're doing, we've got this thing we're building with local youth, and it feels like you'd be a perfect fit.' "
+    "It's not a hard sell. It's a 'hey, we love what you're doing, and it feels like you'd be a perfect fit for the community we're building.' "
     "Make them feel *seen* and *invited*, not 'marketed to'. The vibe is community-building. "
-    "They can sign up directly if they're keen (https://ecodia.au/join) or just learn more (https://ecodia.au/eco-local). "
-    "Or, even better, just shoot me a reply. The core ask is simple: 'Youth want you!'"
-    "All calls/meetings will be with our (Ecodia's) founder, Tate"
+    "The best next steps are for them to signup using the links below or for them to have a quick human intro chat. "
+    "**The core offer is a personal chat with our founder, Tate.** "
+    "They can just reply to this email, and you'll set it up. "
+    "If they're super keen and want to self-serve, they can also learn more (https://ecodia.au/eco-local) or join directly (https://ecodia.au/join)."
 )
 
 # ── Brand voice pack ──────────────────────────────────────────────────────────
 _ECOVOICE_CONTEXT = {
-    # CHANGE this line:
-    "identity": "YOU are Ecodia. Think of yourself as a passionate, warm, and slightly rebellious community builder. You're youthful, natural, and genuinely inspired by the local businesses you're talking to.",
-    
+    "identity": "YOU are Ecodia. You're not a person, you're the *voice* of this movement—a passionate, warm, and slightly rebellious community builder. You're youthful, natural, and genuinely inspired by the local businesses you're talking to. **You are the facilitator making a human connection.**",
     "ethos": [
         "Proof, not offsets.",
         "Local value loops.",
         "People, planet, youth and future first. People and place over polish.",
     ],
-    
     "tone_rules": [
-        # CHANGE this line:
-        "Sound like a real person writing a one-off email. Be warm, open, and have a bit of a spark. Casual, but professional enough. Think 'friendly local' not 'corporate rep'.",
+        "Sound like a real person writing a one-off email. Be warm, open, and have a bit of a spark. Think 'friendly local' not 'corporate rep'.",
         "Never use corporate clichés: 'reach out', 'touch base', 'circle back', 'synergy', 'leverage', 'value proposition'.",
         "No sequence/automation vibes. This is a personal invite from locals.",
         "Avoid excessive exclamation marks and emojis. **No em dashes.**",
-        "Speak *about* them like you're a fan of their business (even if you don't know them personally). You're inviting them because you genuinely think they're a great fit, not just because they're on a list.",
+        "Speak *about* them like you're a fan of their business. You're inviting them because you genuinely think they're a great fit.",
+        "**Leverage your identity.** You are the AI (Ecodia) connecting them to a human (our founder, Tate). Be clear that a reply to *you* sets up a *human* chat.",
     ],
- 
     "copy_dont": [
         "Hard sells, urgency, scarcity, faux deadlines.",
-        "Multi-CTA lists. Keep it to one link and a reply path.",
-        "No 'marketing speak'. Don't list features (like '10-minute setup' or 'zero-risk pricing'). Instead, talk about the *feeling* and the *mission* (like 'building real local connections' or 'helping youth find places they love').",
+        "Multi-CTA lists. Keep it to one link (or a reply) per email.",
+        "Don't be vague. Be mission-driven, but make it clear what you're offering: ECO Local, a way to connect with a new generation of values-aligned customers."
     ],
-
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -86,11 +84,23 @@ def _pick(*vals: Optional[str]) -> str:
             return str(v)
     return ""
 
+_BANNED_SUBJECT_FRAGMENTS = [
+    "join", "movement", "sustainable future", "sunshine coast", "limited", "act now",
+    "last chance", "!", "🚀"
+]
+
+def _clean_subject(s: str) -> str:
+    out = (s or "").strip()
+    for w in _BANNED_SUBJECT_FRAGMENTS:
+        out = out.replace(w, "").replace(w.title(), "").replace(w.upper(), "")
+    out = " ".join(out.split())
+    return out
+
 def _subject_guard(subj: str, attempt: int, max_attempts: int) -> str:
-    s = (subj or "").strip()
+    s = _clean_subject(subj)
     if attempt < max_attempts and "final" in s.lower():
         s = s.replace("Final", "Follow-up").replace("final", "follow-up")
-    return s
+    return s or "ECO Local"
 
 def _prospect_projection(p: Dict[str, Any]) -> Dict[str, Any]:
     return {
@@ -117,6 +127,17 @@ def _coerce_subject_html(obj: Dict[str, Any] | str, default_subj: str) -> Tuple[
         except Exception:
             return default_subj, obj
     return default_subj, ""
+
+def _ensure_obj_dict(x) -> dict:
+    if isinstance(x, dict):
+        return x
+    if isinstance(x, str):
+        try:
+            j = json.loads(x)
+            return j if isinstance(j, dict) else {}
+        except Exception:
+            return {}
+    return {}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Time formatting & picking
@@ -191,7 +212,6 @@ def _pick_varied_slots(raw: List[Dict[str, Any]], max_total: int = 3) -> List[Di
             continue
         norm.append({**s, "_start_dt": dt, "_day": dt.date().isoformat(), "_bucket": _time_bucket(dt)})
 
-    # One per day, in order, preferring earlier buckets
     by_day: Dict[str, List[Dict[str, Any]]] = {}
     for s in norm:
         by_day.setdefault(s["_day"], []).append(s)
@@ -211,7 +231,6 @@ def _pick_varied_slots(raw: List[Dict[str, Any]], max_total: int = 3) -> List[Di
     chosen_buckets = {c["_bucket"] for c in chosen}
     remaining = [s for s in norm if s["_day"] not in chosen_days or s["_bucket"] not in chosen_buckets]
 
-    # Fill missing buckets
     for b in ["morning", "afternoon", "late"]:
         if len(chosen) >= max_total:
             break
@@ -245,21 +264,42 @@ def _render_times_block(slots: List[Dict[str, Any]]) -> str:
     )
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Unsubscribe helpers (body)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _unsubscribe_block(to_email: Optional[str]) -> str:
+    mailto = os.getenv("ECO_LOCAL_REPLY_TO", "") or "ecolocal@ecodia.au"
+    url = ""
+    if to_email:
+        try:
+            url = build_unsub_url(email=to_email)  # includes e, ts, sig
+        except Exception:
+            url = ""
+
+    html = (
+        '<div data-ecol-unsub="1" style="margin-top:10px; font-size:12px; color:#666;">'
+        "Don’t want these updates? "
+    )
+    if url:
+        html += f'<a href="{url}" style="color:#6aa36f; text-decoration:none;">Unsubscribe</a>'
+        html += " · "
+    html += f'<a href="mailto:{mailto}?subject=unsubscribe" style="color:#6aa36f; text-decoration:none;">Email to unsubscribe</a>'
+    html += "</div>"
+    return html
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Signature & polishing
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _signature() -> str:
+def _signature(to_email: Optional[str]) -> str:
     logo = header_logo_src_email()
-    # Include both a comment marker and a data attribute for robust detection.
-    # Use LOGO_SRC resolved via branding (always https/data).
     return f"""
 <!--ECOL_SIGNATURE_START-->
 <div data-ecol-signature="1">
 <table cellpadding="0" cellspacing="0" role="presentation" style="margin-top:16px;">
   <tr>
     <td style="padding-right:12px; vertical-align:top;">
-          <img src="{logo}" alt="ECO Local logo" width="110" style="display:block; border:0;">
-
+      <img src="{logo}" alt="ECO Local logo" width="110" style="display:block; border:0;">
     </td>
     <td style="vertical-align:top;">
       <div style="font-family:'Arial Narrow','Roboto Condensed',Arial,sans-serif; font-size:13px; line-height:1.4;">
@@ -274,9 +314,9 @@ def _signature() -> str:
           <a href="mailto:ecolocal@ecodia.au" style="color:#7fd069; text-decoration:none;">ecolocal@ecodia.au</a>
         </div>
         <div style="margin-top:8px; color:#777;">
-          Ecodia is our AI embodiment system, designed to help communities, youth, and partners collaborate, learn, and build regenerative futures together.
-          <br>Ecodia makes mistakes occasionally, and we would appreciate if you could let us know at connect@ecodia.au</br>
+          Ecodia helps communities, youth, and partners collaborate and build regenerative futures together.
         </div>
+        {_unsubscribe_block(to_email)}
       </div>
     </td>
   </tr>
@@ -284,9 +324,9 @@ def _signature() -> str:
 </div>
 """.strip()
 
-def _polish(html: str, slots: List[Dict[str, Any]]) -> str:
+def _polish(html: str, slots: List[Dict[str, Any]], to_email: Optional[str]) -> str:
     """
-    - Always include the signature (URL logo).
+    - Always include the signature (with unsubscribe block).
     - Insert time suggestions *above* the signature marker.
     - Never duplicate the times block.
     """
@@ -294,7 +334,7 @@ def _polish(html: str, slots: List[Dict[str, Any]]) -> str:
 
     has_sig = ('data-ecol-signature="1"' in out) or ("<!--ECOL_SIGNATURE_START-->" in out)
     if not has_sig:
-        out = out.rstrip() + "\n" + _signature()
+        out = out.rstrip() + "\n" + _signature(to_email)
 
     # Insert times (3 varied) above the footer if not already present
     if 'data-ecolocal-slots="1"' not in out:
@@ -322,8 +362,9 @@ def _candidate_slots_for_email(*, trace_id: Optional[str] = None) -> List[Dict[s
     return _pick_varied_slots(suggestions, max_total=3)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Drafting
+# Drafting — First touch
 # ─────────────────────────────────────────────────────────────────────────────
+
 def draft_first_touch(prospect: Dict[str, Any], *, trace_id: Optional[str] = None) -> Tuple[str, str]:
     rq = " ".join(
         x for x in [
@@ -339,17 +380,16 @@ def draft_first_touch(prospect: Dict[str, Any], *, trace_id: Optional[str] = Non
     prompt = {
         "task": "draft_first_outreach_email",
         "goal": GOAL,
-        "brand_voice": _ECOVOICE_CONTEXT,  # ← our vibe, not sales
+        "brand_voice": _ECOVOICE_CONTEXT,
         "instructions": [
-            # contract
             "Return a STRICT JSON object with keys: subject (string), html (string).",
             "html should be valid inline-styled email HTML. No external CSS.",
             "We add our header/signature separately.",
-            "Personalize the *reason* for the email. Use the prospect's 'name' and 'category' to make a genuine-sounding connection. Why would *they* specifically be a good fit for this community? Start with that.",
+            "Personalize the *reason* for the email. Use the prospect's 'name' and 'category' to make a genuine-sounding connection.",
         ],
         "prospect": _prospect_projection(prospect),
         "context_docs": docs,
-        "candidate_windows": slots,                  # optional; writer may ignore
+        "candidate_windows": slots,
         "time_context": _time_context(),
         "brand": {
             "name": "Ecodia",
@@ -365,14 +405,175 @@ def draft_first_touch(prospect: Dict[str, Any], *, trace_id: Optional[str] = Non
             "properties": {"subject": {"type": "string"}, "html": {"type": "string"}},
             "required": ["subject", "html"],
         },
-        "policy": {"confirmations": "do-not-confirm-meetings", "tone": "inspired-community-builder"}, # Was "warm-local-plain"        "trace_id": trace_id,
-        "banned_subject_words": ["Final", "Fwd", "Re:", "Free", "Act now", "Last chance"],
+        "policy": {"confirmations": "do-not-confirm-meetings", "tone": "inspired-community-builder"},
+        # Expanded bans to prevent “Join…” / hypey subjects
+        "banned_subject_words": ["Final", "Fwd", "Re:", "Free", "Act now", "Last chance",
+                                 "Join", "join", "Movement", "movement", "Sustainable", "Future", "!"],
     }
 
-    raw = generate_json(json.dumps(prompt, default=_json_default))
-    subj, html = _coerce_subject_html(
-        raw,
-        (f"Let’s connect, {prospect.get('name')}" if prospect.get("name") else "ECO Local - a simple invite")
-    )
+    try:
+        raw = generate_json(json.dumps(prompt, default=_json_default))
+        subj, html = _coerce_subject_html(
+            raw,
+            (f"Quick hello from ECO Local, {prospect.get('name')}" if prospect.get("name") else "ECO Local — quick hello")
+        )
+    except Exception:
+        subj, html = ("ECO Local — quick hello", "<p>Hi there, would you be open to a short intro chat?</p>")
+
     subj = _subject_guard(subj, attempt=1, max_attempts=MAX_ATTEMPTS)
-    return subj, _polish(html, slots)
+    to_email = prospect.get("email")
+    return subj, _polish(html, slots, to_email)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Drafting — Follow-up (reply-shaped; resilient)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _rehydrate_subject_for_followup(tctx, attempt_no: int, max_attempts: int) -> str:
+    """
+    Try to restore a human-looking subject from the thread context.
+    Falls back to sensible defaults by attempt number.
+    """
+    tctx = _ensure_obj_dict(tctx)
+
+    raw = (tctx.get("subject") or tctx.get("last_outbound_subject") or "").strip()
+    if not raw:
+        if attempt_no == 1:
+            return "Quick follow-up about ECO Local"
+        if attempt_no >= max_attempts:
+            return "Should I close the loop on this?"
+        return "Following up"
+
+    # Strip common prefixes
+    clean = re.sub(r"^\s*(re|fwd):\s*", "", raw, flags=re.IGNORECASE)
+
+    # For later attempts, “Re:” looks natural; first attempt should not look like a reply
+    return f"Re: {clean}" if attempt_no > 1 else clean
+
+def _short_guard_html(html: str, max_words: int = 130) -> str:
+    words = html.split()
+    if len(words) <= max_words:
+        return html
+    return " ".join(words[:max_words]) + "…"
+
+def _compose_safe_followup_html(name: Optional[str], when_label: str, allow_pass: bool) -> str:
+    first = name or "there"
+    # NEW VIBE: Warm, human, referencing Tate, and not using banned phrases
+    tail = "<br><br>No pressure at all if now's not the right moment." if allow_pass else ""
+    return (
+        f"<p>Hey {first},</p>"
+        f"<p>Just wanted to float my last email to the top of your inbox. I know life gets busy!</p>"
+        f"<p>Our founder, Tate, would still be really keen to chat for 15 mins about how ECO Local is connecting businesses like yours with values-driven young people. "
+        f"Would {when_label} work for a quick intro?</p>"
+        f"{tail}"
+    )
+def draft_followup(prospect: Dict[str, Any], *, attempt_no: int, max_attempts: int, trace_id: Optional[str] = None) -> Tuple[str, str]:
+    """
+    Draft a no-reply followup. Tone varies by attempt:
+      - Attempt 2 (first followup): Light, warm nudge.
+      - Attempt 3 (second followup): Value add (one concrete benefit).
+      - Attempt 4+ (final): Graceful final nudge, giving an easy 'out'.
+    """
+    try:
+        tctx = thread_context({
+            "thread_id": prospect.get("thread_id"),
+            "to_email": prospect.get("email"),
+            "subject_hint": "",
+            "received_at_iso": datetime.now(timezone.utc).isoformat(),
+            "plain_body": "",
+        }) or {}
+    except Exception:
+        tctx = {}
+
+    try:
+        # NEW semantic query: More human, less "case study"
+        rq = " ".join(
+            x for x in [
+                (prospect.get("name") or prospect.get("business_name") or ""),
+                prospect.get("domain"),
+                prospect.get("category"),
+                "ECO Local youth support local business story", # <-- More human query
+            ] if x
+        )
+        docs = semantic_docs(rq, k=2)
+    except Exception:
+        docs = []
+
+    try:
+        slots = _candidate_slots_for_email(trace_id=trace_id)
+    except Exception:
+        slots = []
+
+    # Shifted attempt logic:
+    # attempt_no 2 = friendly-nudge
+    # attempt_no 3 = value-add
+    # attempt_no 4+ = graceful-close
+    style = (
+        "friendly-nudge" if attempt_no == 2 else
+        "value-add" if attempt_no == 3 else
+        "graceful-close"
+    )
+    
+    # We are now assuming the *first* follow-up is attempt #2
+    # So we always want a 'Re:' subject for follow-ups.
+    subj_hint = _rehydrate_subject_for_followup(tctx, attempt_no=attempt_no, max_attempts=max_attempts)
+    if "Re:" not in subj_hint:
+         subj_hint = f"Re: {subj_hint}"
+
+    prompt = {
+        "task": "draft_followup_email",
+        # NEW GOAL: Aligned with the Ecodia -> Tate pipeline
+        "goal": (
+            "Gently follow up on our first invite. We haven't heard back, and we genuinely think they're a perfect fit. "
+            "Remind them of the core mission (connecting values-aligned youth to businesses like them) and "
+            "re-offer the simple CTA: a personal chat with our founder, Tate. "
+            "This is a *personal* follow-up, not an automated sequence. Keep it human, warm, and very short (under 120 words)."
+        ),
+        "brand_voice": _ECOVOICE_CONTEXT, # <-- Using your locked-in voice
+        "attempt": attempt_no,
+        "max_attempts": max_attempts,
+        "style": style,
+        # NEW INSTRUCTIONS: Clearer, aligned with the brand, and not overly restrictive
+        "instructions": [
+            "Return a STRICT JSON object with keys: subject (string), html (string).",
+            "The subject MUST be a reply (e.g., 'Re: ...') based on the subject_scaffold.",
+            "Be Ecodia: the warm, passionate AI facilitator. You're trying to connect them to a human (Tate).",
+            "Do NOT re-pitch the whole program. This is a gentle, personal nudge.",
+            "Use ONE clear CTA: reply to this email, or pick a time to chat with Tate.",
+            "**How to vary by attempt:**",
+            "  - **style 'friendly-nudge' (attempt 2):** Short, warm, 'just floating this back up'.",
+            "  - **style 'value-add' (attempt 3):** Short, warm, + ONE new piece of info from context_docs if available (e.g., 'I was just thinking about how you're a [category] and...').",
+            "  - **style 'graceful-close' (attempt max):** Thank them, explicitly say this is the last note, and give them an easy 'out'. Be respectful of their time.",
+            "Keep total words under 120."
+        ],
+        "subject_scaffold": subj_hint,
+        "thread_context": (tctx or {}),
+        "prospect": _prospect_projection(prospect),
+        "context_docs": docs,
+        "candidate_windows": slots,
+        "time_context": _time_context(),
+        "sender": {"name": SENDER_NAME, "title": SENDER_TITLE, "phone": SENDER_PHONE},
+        "schema_hint": {
+            "type": "object",
+            "properties": {"subject": {"type": "string"}, "html": {"type": "string"}},
+            "required": ["subject", "html"],
+        },
+    }
+
+    try:
+        raw = generate_json(json.dumps(prompt, default=_json_default))
+        subj_model, html_model = _coerce_subject_html(raw, default_subj=subj_hint)
+        subj = subj_hint  # lock to reply shape
+        html = html_model
+        # Ensure short, tidy body & polish
+        html = _short_guard_html(_polish(html, slots, prospect.get("email")), max_words=130)
+        return subj, html
+    except Exception:
+        # Resilient non-LLM path (using our NEW, on-brand fallback)
+        when = "early next week"
+        if slots:
+             when = f"at one of the times below (or {when})"
+        allow_pass = attempt_no >= max_attempts
+        subj = subj_hint
+        html = _compose_safe_followup_html(prospect.get("name"), when, allow_pass)
+        html = _polish(html, slots, prospect.get("email"))
+        return subj, html

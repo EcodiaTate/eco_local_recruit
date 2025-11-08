@@ -1,3 +1,4 @@
+# recruiting/gmail_client.py
 from __future__ import annotations
 
 import base64
@@ -20,6 +21,7 @@ _GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
 # Label we add after processing (created if missing).
 PROCESSED_LABEL_NAME = os.getenv("ECO_LOCAL_GMAIL_PROCESSED_LABEL", "ECO Local/Processed")
+UNSUB_LABEL_NAME = os.getenv("ECO_LOCAL_GMAIL_UNSUB_LABEL", "ECO Local/Unsubscribe")
 
 # Default label to fetch from (system label works by name: INBOX, SENT, etc.)
 DEFAULT_FETCH_LABEL = os.getenv("ECO_LOCAL_GMAIL_FETCH_LABEL", "INBOX")
@@ -183,11 +185,10 @@ def fetch_unseen_since(
 
                 payload = full.get("payload", {}) or {}
                 headers = payload.get("headers", []) or []
-                # ... after headers parsed:
                 hdr = _headers_to_dict(headers)
                 body_plain, body_html = _extract_bodies(payload)
 
-                message_id_hdr = hdr.get("message-id", "")  # ← real RFC Message-ID
+                message_id_hdr = hdr.get("message-id", "")  # RFC Message-ID
 
                 internal_ms = full.get("internalDate", "")
                 date_hdr = hdr.get("date", "")
@@ -210,7 +211,7 @@ def fetch_unseen_since(
                     "id": full.get("id"),
                     "gmail_id": full.get("id"),
                     "message_id": full.get("id"),        # legacy
-                    "rfc_message_id": message_id_hdr,    # ← NEW
+                    "rfc_message_id": message_id_hdr,    # preferred
                     "thread_id": full.get("threadId"),
                     "from": hdr.get("from",""),
                     "to": hdr.get("to",""),
@@ -221,8 +222,10 @@ def fetch_unseen_since(
                     "internal_date": internal_ms,
                     "internal_date_iso": internal_iso,
                     "date": date_hdr,
+                    # expose a couple unsubscribe-related headers for triage:
+                    "list_unsubscribe": hdr.get("list-unsubscribe",""),
+                    "list_unsubscribe_post": hdr.get("list-unsubscribe-post",""),
                 })
-
 
             if not page_token:
                 break
@@ -267,3 +270,35 @@ def mark_processed_message(message_id: str, *, add_label: Optional[str] = PROCES
         log.debug("[gmail] mark_processed id=%s label=%s", message_id, add_label)
     except HttpError:
         log.exception("[gmail] mark_processed failed id=%s", message_id)
+
+
+# ─────────────────────────────────────────────────────────
+# Unsubscribe helpers (for triage)
+# ─────────────────────────────────────────────────────────
+def is_unsubscribe_request(subject: str, body_text: str, body_html: str) -> bool:
+    """
+    Heuristics to catch manual “unsubscribe / stop emails” replies.
+    We still prefer the ‘unsubscribe’ intent in LLM flow; this just short-circuits obvious cases.
+    """
+    s = (subject or "").lower()
+    b = ((body_text or "") + " " + (body_html or "")).lower()
+    keys = [
+        "unsubscribe", "remove me", "stop emails", "stop emailing", "opt out",
+        "no more emails", "do not contact", "don't contact", "un-subscribe",
+    ]
+    return any(k in s or k in b for k in keys)
+
+
+def label_unsubscribe(message_id: str) -> None:
+    """Label an email as Unsubscribe for easy tracking."""
+    try:
+        svc = _build_gmail_service()
+        lab_id = _ensure_label_id(svc, UNSUB_LABEL_NAME)
+        svc.users().messages().modify(
+            userId="me",
+            id=message_id,
+            body={"addLabelIds": [lab_id], "removeLabelIds": ["UNREAD"]},
+        ).execute()
+        log.info("[gmail] labeled message as Unsubscribe id=%s", message_id)
+    except HttpError:
+        log.exception("[gmail] label_unsubscribe failed id=%s", message_id)

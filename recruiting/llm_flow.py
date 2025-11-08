@@ -24,6 +24,7 @@ from .calendar_client import (
     build_ics,
     ICSSpec,
 )
+from .unsub_links import build_unsub_url, build_list_unsub_headers  # ← NEW
 
 log = logging.getLogger(__name__)
 if not logging.getLogger().handlers:
@@ -106,6 +107,7 @@ class BookingDecision:
     action: str  # none | hold | event | promote_hold | cancel_holds | cancel_thread_events
     chosen_slot: Optional[CandidateSlot]
     location_hint: Optional[str]
+    meeting_type: Optional[str] = None      # "call" | "meeting"
     internal_notes: Optional[str] = None
 
 
@@ -129,6 +131,9 @@ class FlowOutput:
     draft: DraftResult
     ics: Optional[Tuple[str, bytes]] = None  # build_ics returns (filename, bytes)
     semantic_context: Optional[List[Dict[str, Any]]] = None  # expose injected facts
+    # NEW: deliver unsubscribe bits to the caller for SES headers, UI, logging, etc.
+    list_unsub_headers: Dict[str, str] = None  # {"List-Unsubscribe": "...", "List-Unsubscribe-Post": "..."}
+    unsubscribe_url: Optional[str] = None
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Tool inventory (LLM-visible)
@@ -160,12 +165,22 @@ def _tool_catalog() -> List[ToolSpec]:
         ToolSpec(
             name="calendar.create_hold",
             description="Place a *tentative* hold. Attaches an .ics (REQUEST). Does NOT send a Google invite.",
-            args={"start_iso": "string", "end_iso": "string", "summary": "string", "description": "string", "location": "string|null"},
+            args={
+                "start_iso": "string", "end_iso": "string",
+                "summary": "string", "description": "string",
+                "location": "string|null",
+                "meeting_type": "string|null"  # "call" | "meeting"
+            },
         ),
         ToolSpec(
             name="calendar.create_event",
             description="Create a *firm* event. This WILL send a Google invite to the attendee.",
-            args={"start_iso": "string", "end_iso": "string", "summary": "string", "description": "string", "location": "string|null"},
+            args={
+                "start_iso": "string", "end_iso": "string",
+                "summary": "string", "description": "string",
+                "location": "string|null",
+                "meeting_type": "string|null"
+            },
         ),
         ToolSpec(
             name="calendar.promote_hold_to_event",
@@ -241,52 +256,16 @@ def _trim_doc(d: Dict[str, Any], *, max_chars: int = 1200) -> Dict[str, Any]:
     }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# (Legacy keyword helpers kept in case you re-enable candidate generation)
-# ──────────────────────────────────────────────────────────────────────────────
-
-STOPWORDS = {
-    "re", "fw", "fwd", "the", "a", "an", "and", "or", "to", "of", "in", "on", "for",
-    "at", "with", "we", "you", "i", "me", "us", "our", "your", "is", "it", "that",
-    "this", "hi", "hey", "thanks", "thank", "regards", "best", "team", "subject",
-    "wrote", "mon", "tue", "wed", "thu", "fri", "sat", "sun", "am", "pm",
-}
-
-def _strip_quoted_email(text: str) -> str:
-    if not text:
-        return ""
-    lines = [ln for ln in text.splitlines() if not ln.strip().startswith(">")]
-    text = "\n".join(lines)
-    text = re.split(r"\nOn .* wrote:\s*\n", text, flags=re.IGNORECASE)[0]
-    text = re.sub(r"https?://\S+", " ", text)
-    text = re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
-
-def _keywords_from_subject_body(subject: str, body: str) -> List[str]:
-    raw = f"{subject} {body}".lower()
-    tokens = re.findall(r"[a-z][a-z\-]{2,}", raw)
-    keywords = [t for t in tokens if t not in STOPWORDS]
-    seen = set(); out = []
-    for t in keywords:
-        if t not in seen:
-            seen.add(t); out.append(t)
-    return out[:20]
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Semantic docs: LOCAL ONLY (no HTTP; ignores ECO_LOCAL_API_BASE)
+# Semantic docs: LOCAL ONLY
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _get_semantic_docs(
     email: EmailEnvelope,
     *,
     k: int,
-    loose: bool,  # retained for signature compatibility; unused here
+    loose: bool,
     semantic_query_override: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """
-    Local-only semantic retrieval.
-    1) If override query provided: use local semantic_docs(query, k).
-    2) Else: use semantic_topk_for_thread(email, k).
-    """
     try:
         if semantic_query_override:
             docs = semantic_docs(semantic_query_override, k=k) or []
@@ -302,9 +281,9 @@ def _get_semantic_docs(
 
     return []
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────-
 # Prompts
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────-
 
 def _prompt_analyze_and_plan(env: EmailEnvelope, tz: str, *, semantic_docs: List[Dict[str, Any]]) -> Dict[str, Any]:
     system = (
@@ -329,8 +308,9 @@ def _prompt_analyze_and_plan(env: EmailEnvelope, tz: str, *, semantic_docs: List
             "3) Set boolean `has_questions`: true iff the user asked any explicit question.",
             "4) Did the user ALREADY CONFIRM a specific time? Return boolean `user_confirmed`.",
             "5) If meeting-related or reschedule implied, propose concrete date ranges and build `calendar_queries`.",
-            "6) List IDs of any `semantic_context.docs` you believe will be needed.",
-            "7) Use the previous scheduling context to figure out if the user is talking about this week or next when stating a day. Do not jump to conclusions."
+            "6) If meeting-related, identify likely `meeting_type` as 'call' or 'meeting' (in person).",
+            "7) If meeting-related, suggest `location_hint` (business name or empty for call).",
+            "8) Use the previous scheduling context to figure out if the user is talking about this week or next when stating a day.",
         ],
         "tools": [asdict(t) for t in _tool_catalog() if ("search" in t.name or "check" in t.name)],
         "return_format": {
@@ -357,7 +337,9 @@ def _prompt_analyze_and_plan(env: EmailEnvelope, tz: str, *, semantic_docs: List
                     }
                 },
                 "facts_needed": {"type": "array", "items": {"type": "string"}},
-                "confidence": {"type": "number"}
+                "confidence": {"type": "number"},
+                "meeting_type": {"type": ["string", "null"], "enum": ["call", "meeting", None]},
+                "location_hint": {"type": ["string", "null"]},
             },
             "required": ["intent", "summary", "sought_outcome", "calendar_queries", "confidence", "user_confirmed", "has_questions"]
         }
@@ -375,24 +357,10 @@ def _prompt_coordinator_action(
     user_confirmed: bool,
     has_questions: bool,
 ) -> Dict[str, Any]:
-    # System prompt explicitly gates the Q&A paragraph on `has_questions`
     system = (
-        "You are Ecodia, the same warm, passionate, and slightly rebellious community builder from our first email. This is a *conversation*, not a transaction.\n"
-        "The person you're replying to is already engaged, so keep that natural, casual, and inspired vibe going. Sound like a real person helping them out.\n"
-        "Never use corporate clichés or sound like a robot. Avoid em dashes.\n"
-        "If they have questions, answer them clearly using *only* the provided `semantic_context` facts. Don't make things up.\n"
-        "If they're booking a time, be helpful and confirm the details simply. All calls/meetings will be with our (Ecodia's) founder, Tate. The goal is to make this feel easy and human.\n"
-        "Return JSON only."
+        "You are Ecodia, a warm community facilitator. Be clear, natural, and useful.\n"
+        "Answer questions only from provided facts. Return JSON only."
     )
-
-    response_requirements = {
-        "must_do": [""],
-        "meeting_rules": [
-            "If action = 'hold' or 'event', try to casually get confirmation from them via the event or through their next reply."
-        ],
-        "info_rules": [],
-        "confirmation_rules": []
-    }
 
     user = {
         "timezone": tz,
@@ -409,11 +377,9 @@ def _prompt_coordinator_action(
         },
         "user_confirmed": bool(user_confirmed),
         "has_questions": bool(has_questions),
-        "response_requirements": response_requirements,
         "ask": [
-            "1) Ensure day/date correctness.",
-            "2) List IDs of any `semantic_context.docs` you actually used.",
-            "3) Be warm and natural."
+            "1) Decide booking action. If scheduling, set `meeting_type` ('call' or 'meeting') and `location_hint` (business).",
+            "2) Draft friendly reply.",
         ],
         "return_format": {
             "type": "object",
@@ -428,6 +394,7 @@ def _prompt_coordinator_action(
                             "required": ["start", "end", "reason"]
                         },
                         "location_hint": {"type": ["string", "null"]},
+                        "meeting_type": {"type": ["string", "null"], "enum": ["call", "meeting", None]},
                         "internal_notes": {"type": ["string", "null"]}
                     },
                     "required": ["action", "chosen_slot"]
@@ -444,9 +411,9 @@ def _prompt_coordinator_action(
     }
     return {"system": system, "user": user}
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Email polishing (signature + optional time suggestions)
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────-
+# Email polishing (signature + optional time + unsubscribe)
+# ─────────────────────────────────────────────────────────────────────────────-
 
 _LOGO_SRC = header_logo_src_email()  # email-safe https/data
 
@@ -469,9 +436,28 @@ def _render_times_block(slots: List[CandidateSlot]) -> str:
         f"<ul>{items}</ul>"
         "</div>"
     )
+def _unsubscribe_block(to_email: Optional[str]) -> str:
+    mailto = os.getenv("ECO_LOCAL_REPLY_TO", "") or "ecolocal@ecodia.au"
+    url = ""
+    if to_email:
+        try:
+            url = build_unsub_url(email=to_email)  # includes e, ts, sig
+        except Exception:
+            url = ""
 
-def _signature_block() -> str:
-    # marker + data attribute for reliable de-dup and insertion
+    html = (
+        '<div data-ecol-unsub="1" style="margin-top:10px; font-size:12px; color:#666;">'
+        "Don’t want these updates? "
+    )
+    if url:
+        html += f'<a href="{url}" style="color:#6aa36f; text-decoration:none;">Unsubscribe</a>'
+        html += " · "
+    html += f'<a href="mailto:{mailto}?subject=unsubscribe" style="color:#6aa36f; text-decoration:none;">Email to unsubscribe</a>'
+    html += "</div>"
+    return html
+
+
+def _signature_block(to_email: Optional[str]) -> str:
     return f"""
 <!--ECOL_SIGNATURE_START-->
 <div data-ecol-signature="1">
@@ -488,10 +474,10 @@ def _signature_block() -> str:
             <a href="https://ecodia.au/eco-local" style="color:#7fd069; text-decoration:none;">ecodia.au/eco-local</a><br>
             <a href="mailto:ecolocal@ecodia.au" style="color:#7fd069; text-decoration:none;">ecolocal@ecodia.au</a>
           </div>
-          <div style="margin-top:8px; color:#777%;">
+          <div style="margin-top:8px; color:#777;">
             Ecodia helps communities, youth, and partners collaborate and build regenerative futures together.
-            <br>We sometimes make mistakes - let us know at connect@ecodia.au</br>
           </div>
+          { _unsubscribe_block(to_email) }
         </div>
       </td>
     </tr>
@@ -499,27 +485,25 @@ def _signature_block() -> str:
 </div>
 """.strip()
 
-def _polish_email_html(html: str, slots: List[CandidateSlot]) -> str:
+def _polish_email_html(html: str, slots: List[CandidateSlot], to_email: Optional[str]) -> str:
     """
-    - Ensure a branded signature with https/data logo is present.
+    - Ensure a branded signature (with unsubscribe) is present.
     - If not already present, insert up to 3 varied time options *above* the signature marker.
-    - Avoid duplicating either section.
     """
     out = (html or "")
     has_sig = ('data-ecol-signature="1"' in out) or ("<!--ECOL_SIGNATURE_START-->" in out)
     if not has_sig:
-        out = out.rstrip() + "\n" + _signature_block()
+        out = out.rstrip() + "\n" + _signature_block(to_email)
 
     if 'data-ecolocal-slots="1"' not in out:
         times_html = _render_times_block(slots)
         if times_html:
             out = out.replace("<!--ECOL_SIGNATURE_START-->", times_html + "\n<!--ECOL_SIGNATURE_START-->")
-
     return out
 
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────-
 # Tool executor
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────-
 
 def _exec_tool_call(call: ToolCall, tz: ZoneInfo, *, thread_id: Optional[str], email_envelope: EmailEnvelope) -> Tuple[str, Any]:
     name = call.tool
@@ -527,8 +511,7 @@ def _exec_tool_call(call: ToolCall, tz: ZoneInfo, *, thread_id: Optional[str], e
     attendee_email = _bare_email(email_envelope.from_addr or None)
 
     if name == "calendar.check_free":
-        s = args["start_iso"]
-        e = args["end_iso"]
+        s = args["start_iso"]; e = args["end_iso"]
         free = is_range_free(s, e)
         return name, {"free": bool(free)}
 
@@ -553,6 +536,8 @@ def _exec_tool_call(call: ToolCall, tz: ZoneInfo, *, thread_id: Optional[str], e
             description=args.get("description") or "Provisional hold (auto-expires unless confirmed).",
             tz=str(tz),
             send_updates="none",
+            meeting_type=(args.get("meeting_type") or None),
+            location_name=(args.get("location") or None),
         )
         return name, {"event_id": evt.get("id"), "summary": evt.get("summary")}
 
@@ -569,6 +554,8 @@ def _exec_tool_call(call: ToolCall, tz: ZoneInfo, *, thread_id: Optional[str], e
             prospect_email=attendee_email,
             kind="CONFIRMED",
             send_updates="all",
+            meeting_type=(args.get("meeting_type") or None),
+            location_name=(args.get("location") or None),
         )
         return name, {"event_id": evt.get("id"), "summary": evt.get("summary")}
 
@@ -586,9 +573,9 @@ def _exec_tool_call(call: ToolCall, tz: ZoneInfo, *, thread_id: Optional[str], e
 
     return name, {"error": f"tool {name} not allowed"}
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Pipeline (2-step) - with semantic_k and LLM-led confirmation
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────-
+# Pipeline
+# ─────────────────────────────────────────────────────────────────────────────-
 
 def run_llm_flow(
     *,
@@ -598,26 +585,15 @@ def run_llm_flow(
     allow_calendar_writes: bool = False,
     max_tool_rounds: int = 3,
     semantic_k: int = 5,
-    semantic_loose: bool = True,  # kept for signature compatibility
+    semantic_loose: bool = True,
     semantic_query_override: Optional[str] = None,
 ) -> FlowOutput:
     z = ZoneInfo(tz)
 
-    # 0) Initial semantic injection (LOCAL ONLY)
+    # 0) Semantic
     sem_docs = _get_semantic_docs(email, k=semantic_k, loose=semantic_loose, semantic_query_override=semantic_query_override)
-    try:
-        if sem_docs:
-            log.info(
-                "[llm_flow] injected %d semantic docs: %s",
-                len(sem_docs),
-                ", ".join([f"{(d.get('title') or '')[:40]}#{(d.get('id') or '')[:6]}" for d in sem_docs]),
-            )
-        else:
-            log.info("[llm_flow] injected 0 semantic docs")
-    except Exception:
-        log.exception("[llm_flow] logging semantic docs failed")
 
-    # 1) Plan - includes LLM judgment for confirmation + question detection
+    # 1) Plan
     a_raw = llm([_prompt_analyze_and_plan(email, tz, semantic_docs=sem_docs)])
     plan = AnalysisPlan(
         intent=a_raw.get("intent", "other"),
@@ -631,19 +607,9 @@ def run_llm_flow(
         has_questions=bool(a_raw.get("has_questions", False)),
     )
 
-    # 1b) Optional targeted retrieval pass if there ARE questions (LOCAL ONLY)
-    if plan.has_questions and plan.explicit_questions:
-        try:
-            targeted = semantic_docs(plan.explicit_questions, k=semantic_k) or []
-            if targeted:
-                sem_docs = [_trim_doc(d) for d in targeted]
-                log.info("[llm_flow] reloaded semantic docs from explicit_questions (local) %d docs", len(sem_docs))
-        except Exception:
-            log.exception("semantic_docs(explicit_questions) failed")
-
     tool_rounds: List[ToolRound] = []
 
-    # 1c) Search for slots when meeting intent
+    # 1c) Search for slots
     def _queries_to_calls(qs: List[CalendarQuery]) -> List[ToolCall]:
         calls: List[ToolCall] = []
         for q in qs:
@@ -701,7 +667,7 @@ def run_llm_flow(
                 uniq.append(s)
         all_available_slots = uniq
 
-    # 2) Decide + draft (with user_confirmed & has_questions)
+    # 2) Decide + draft
     final_action_raw = llm([_prompt_coordinator_action(
         email, plan, all_available_slots, tz,
         semantic_docs=sem_docs,
@@ -712,15 +678,23 @@ def run_llm_flow(
     b_raw = final_action_raw.get("booking_decision", {})
     booking = BookingDecision(
         action=b_raw.get("action", "none"),
-        chosen_slot=(CandidateSlot(**b_raw["chosen_slot"]) if b_raw.get("chosen_slot") else None),
+        chosen_slot=(CandidateSlot(**(b_raw["chosen_slot"] or {})) if b_raw.get("chosen_slot") else None),
         location_hint=b_raw.get("location_hint"),
+        meeting_type=b_raw.get("meeting_type"),
         internal_notes=b_raw.get("internal_notes"),
     )
     d_raw = final_action_raw.get("draft_result", {})
-    # polish the LLM html with signature + optional “times” block
+
+    # 2b) Compute unsubscribe artifacts (URL + headers)
+    to_addr_bare = _bare_email(email.to_addr)
+    unsubscribe_url = build_unsub_url(to_addr_bare) if to_addr_bare else None
+    list_unsub_headers = build_list_unsub_headers(to_addr_bare) if to_addr_bare else {}
+
+    # polish the LLM html with signature (incl. unsubscribe) + optional “times” block
     polished_html = _polish_email_html(
         d_raw.get("html", "<p>Thanks for your note - here’s a quick summary below.</p>"),
-        all_available_slots
+        all_available_slots,
+        to_addr_bare,
     )
     draft = DraftResult(
         subject=d_raw.get("subject", f"Re: {email.subject}"),
@@ -733,6 +707,8 @@ def run_llm_flow(
         try:
             s_iso = booking.chosen_slot.start
             e_iso = booking.chosen_slot.end
+            mt = (booking.meeting_type or "").lower().strip()
+            loc = booking.location_hint or ""
 
             if booking.action == "hold":
                 ev = create_hold(
@@ -745,13 +721,15 @@ def run_llm_flow(
                     description="Just a hold till we lock it in.",
                     tz=tz,
                     send_updates="none",
+                    meeting_type=mt or None,
+                    location_name=loc or None,
                 )
                 created_ics = build_ics(ICSSpec(
                     start=s_iso,
                     end=e_iso,
-                    summary=ev.get("summary") or "Ecodia - intro chat",
+                    summary=ev.get("summary") or ("Ecodia - intro chat – Call" if mt == "call" else "Ecodia - intro chat"),
                     description=ev.get("description") or "",
-                    location=booking.location_hint or "",
+                    location=loc or "",
                     attendee_email=(email.from_addr or None),
                     method="REQUEST",
                 ))
@@ -769,6 +747,8 @@ def run_llm_flow(
                     prospect_email=email.from_addr or None,
                     kind="CONFIRMED",
                     send_updates="all",
+                    meeting_type=mt or None,
+                    location_name=loc or None,
                 )
                 log.info("Google invite sent for %s by create_event", s_iso)
 
@@ -782,4 +762,6 @@ def run_llm_flow(
         draft=draft,
         ics=created_ics,
         semantic_context=sem_docs,
+        list_unsub_headers=list_unsub_headers,
+        unsubscribe_url=unsubscribe_url,
     )

@@ -466,7 +466,6 @@ def nearest_n_free(
 # ──────────────────────────────────────────────────────────────────────────────
 # ICS & Events
 # ──────────────────────────────────────────────────────────────────────────────
-
 @dataclass
 class ICSSpec:
     start: str
@@ -478,6 +477,7 @@ class ICSSpec:
     organizer_email: str = "ecolocal@ecodia.au"
     attendee_email: Optional[str] = None
     method: str = "REQUEST"  # Meeting invites should be REQUEST, not PUBLISH
+
 
 def _ics_escape(s: Optional[str]) -> str:
     """Escape text per RFC5545: backslash, comma, semicolon, newline."""
@@ -515,7 +515,6 @@ def build_ics(spec: ICSSpec) -> Tuple[str, bytes]:
     if spec.location:
         lines.append(f"LOCATION:{_ics_escape(spec.location)}")
     if spec.description:
-        # Avoid backslashes inside f-string expressions by pre-escaping
         lines.append(f"DESCRIPTION:{_ics_escape(spec.description)}")
     lines.append(f"ORGANIZER;CN={_ics_escape(spec.organizer_name)}:mailto:{_ics_escape(spec.organizer_email)}")
     if spec.attendee_email:
@@ -524,6 +523,7 @@ def build_ics(spec: ICSSpec) -> Tuple[str, bytes]:
     content = "\r\n".join(lines).encode("utf-8")
     filename = f"ecodia-meeting-{uid}.ics"
     return filename, content
+
 
 def create_hold(
     *,
@@ -539,10 +539,18 @@ def create_hold(
     calendar_id: Optional[str] = None,
     send_updates: str = "none",
     trace_id: Optional[str] = None,
+    meeting_type: Optional[str] = None,         # NEW: "call" | "meeting"
+    location_name: Optional[str] = None,        # NEW: business name or short location
 ) -> Dict[str, Any]:
     tz_str = tz or settings.LOCAL_TZ or "Australia/Brisbane"
+
+    # decorate title with meeting type if provided
+    mt = (meeting_type or "").lower().strip()
+    typetag = "Call" if mt == "call" else ("Meeting" if mt == "meeting" else None)
+    title2 = f"{title} – {typetag}" if typetag and "HOLD" in title else (f"{title} – {typetag}" if typetag else title)
+
     ev = create_event(
-        title=title,
+        title=title2,
         description=description,
         start_iso=start_iso,
         end_iso=end_iso,
@@ -554,6 +562,8 @@ def create_hold(
         prospect_email=prospect_email,
         kind="HOLD",
         trace_id=trace_id,
+        meeting_type=meeting_type,
+        location_name=location_name,
     )
     cal_id = calendar_id or settings.ECO_LOCAL_GCAL_ID
     svc = _build_calendar_service()
@@ -579,43 +589,65 @@ def create_event(
     prospect_email: Optional[str] = None,
     kind: str = "CONFIRMED",
     trace_id: Optional[str] = None,
+    meeting_type: Optional[str] = None,     # NEW: "call" | "meeting"
+    location_name: Optional[str] = None,    # NEW: business name or short location
+    location_full: Optional[str] = None,    # optional full address if you have it later
 ) -> Dict[str, Any]:
+    """
+    Adds:
+      - body['location'] visible in calendar clients
+      - extendedProperties.private:
+            ecoLocalKind, ecoLocalMeetingType, ecoLocalLocationName
+    """
     cal_id = calendar_id or settings.ECO_LOCAL_GCAL_ID
     tzinfo = ZoneInfo(tz or settings.LOCAL_TZ or "Australia/Brisbane")
     start = _to_local(start_iso, tzinfo)
     end = _to_local(end_iso, tzinfo)
 
     # Normalize attendees to bare emails to ensure Google actually emails them
+    from email.utils import parseaddr
     norm_attendees: List[Dict[str, str]] = []
     for a in (attendees or []):
         e = (parseaddr((a or {}).get("email", ""))[1] or "").strip()
         if e:
             norm_attendees.append({"email": e})
 
+    # decorate title with meeting type for confirmed events too
+    mt = (meeting_type or "").lower().strip()
+    typetag = "Call" if mt == "call" else ("Meeting" if mt == "meeting" else None)
+    summary = f"{title} – {typetag}" if typetag and typetag not in title else title
+
+    # choose location field
+    loc = location_full or location_name or ""
+
     service = _build_calendar_service()
     body = {
-        "summary": title,
+        "summary": summary,
         "description": description,
         "start": {"dateTime": start.isoformat(), "timeZone": str(tzinfo)},
         "end": {"dateTime": end.isoformat(), "timeZone": str(tzinfo)},
         "attendees": norm_attendees,
         "transparency": "opaque",
+        **({"location": loc} if loc else {}),
         "extendedProperties": {
             "private": {
                 "ecoLocalKind": kind,
                 **({"ecoLocalThread": thread_id} if thread_id else {}),
                 **({"ecoLocalProspect": prospect_email} if prospect_email else {}),
+                **({"ecoLocalMeetingType": mt} if mt else {}),
+                **({"ecoLocalLocationName": location_name} if location_name else {}),
             }
         },
     }
     log.info(
-        "[calendar] create_event %s→%s title=%r attendees=%d kind=%s cal=%s trace=%s",
-        start, end, title, len(body["attendees"]), kind, cal_id, trace_id
+        "[calendar] create_event %s→%s title=%r attendees=%d kind=%s mt=%s loc=%r cal=%s trace=%s",
+        start, end, summary, len(body.get("attendees", [])), kind, mt or "-", loc, cal_id, trace_id
     )
     ev = service.events().insert(calendarId=cal_id, body=body, sendUpdates=send_updates).execute()
     log.debug("[calendar] event created id=%s link=%s trace=%s", ev.get("id"), ev.get("htmlLink"), trace_id)
     _fb_invalidate(cal_id)
     return ev
+
 
 def update_event_kind(
     event_id: str,
@@ -661,6 +693,9 @@ def patch_event_time(
     cur["start"] = {"dateTime": s.isoformat(), "timeZone": str(tzinfo)}
     cur["end"] = {"dateTime": e.isoformat(), "timeZone": str(tzinfo)}
     cur.setdefault("transparency", "opaque")
+    # Preserve/roll forward our private props
+    priv = (cur.get("extendedProperties") or {}).get("private", {}) or {}
+    cur.setdefault("extendedProperties", {}).setdefault("private", {}).update(priv)
     log.info("[calendar] patch_event_time id=%s %s→%s trace=%s", event_id, s, e, trace_id)
     ev = svc.events().patch(calendarId=cal_id, eventId=event_id, body=cur, sendUpdates=send_updates).execute()
     _fb_invalidate(cal_id)
@@ -674,7 +709,7 @@ def delete_event(event_id: str, *, calendar_id: Optional[str] = None, send_updat
     _fb_invalidate(cal_id)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Thread-scoped helpers
+# Thread-scoped helpers (unchanged except for prop persistence)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _list_events_by_thread(
@@ -922,6 +957,7 @@ def supersede_thread_booking(
         attendees=([{"email": prospect_email}] if prospect_email else []),
         thread_id=thread_id,
         prospect_email=prospect_email,
+        location=None,
         kind="CONFIRMED",
         send_updates="all",
         trace_id=trace_id,
