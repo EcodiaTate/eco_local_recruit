@@ -84,10 +84,7 @@ def _pick(*vals: Optional[str]) -> str:
             return str(v)
     return ""
 
-_BANNED_SUBJECT_FRAGMENTS = [
-    "join", "movement", "sustainable future", "limited", "act now",
-    "last chance", "!", "🚀"
-]
+_BANNED_SUBJECT_FRAGMENTS = []
 
 def _clean_subject(s: str) -> str:
     out = (s or "").strip()

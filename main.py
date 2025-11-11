@@ -363,8 +363,7 @@ def _synth_queries_from_plan(plan: Dict[str, Any], day_seed: Optional[str], batc
         batch.append({"query": q, "city": city, "limit": default_limit})
 
     return batch
-
-# single-stream endpoint
+# single-stream endpoint (bigger & faster by default)
 @app.api_route("/eco-local/recruit/discover/rotate", methods=["GET", "POST"])
 async def discover_rotate(
     request: Request,
@@ -372,9 +371,16 @@ async def discover_rotate(
     require_email: bool | None = Query(default=None, description="Override require-email gate"),
     limit: int | None = Query(default=None, description="Override per-run limit (applies to all items)"),
     refresh: int = Query(default=0, description="Force refresh of plan (1=yes)"),
-    batch_n: int = Query(default=30, description="How many items to process"),
+    # 🚀 process lots more by default
+    batch_n: int = Query(default=200, description="How many items to process"),
+    # new: use this when 'limit' isn't provided
+    default_limit: int = Query(default=50, description="Per-item limit when 'limit' is not provided"),
+    # new: light concurrency for speed (threaded, safe for blocking calls)
+    workers: int = Query(default=8, ge=1, le=64, description="Max concurrent item runners"),
     dry_run: int = Query(default=0, description="If 1, don't invoke; just return the batch"),
 ):
+    import asyncio
+
     body: Dict[str, Any] = {}
     if request.method == "POST":
         body = await _safe_json(request)
@@ -386,40 +392,70 @@ async def discover_rotate(
     refresh       = int(body.get("refresh", refresh or 0))
     batch_n       = int(body.get("batch_n", batch_n))
     dry_run       = int(body.get("dry_run", dry_run))
+    default_limit = int(body.get("default_limit", default_limit))
+    workers       = int(body.get("workers", workers))
+
+    # Guardrails (avoid accidental 10k blowups)
+    batch_n = max(1, min(batch_n, 1000))
+    default_limit = max(1, min(default_limit, 500))
 
     try:
         plan = _load_generator_plan(force_refresh=bool(refresh))
         picked = _synth_queries_from_plan(plan, day_seed, batch_n)
-        if limit:
+
+        # Apply limit defaults/overrides
+        if limit is not None:
+            # One override for all items
             for it in picked:
                 it["limit"] = int(limit)
+        else:
+            # Only set if item lacks a limit
+            for it in picked:
+                if not it.get("limit"):
+                    it["limit"] = default_limit
 
         if dry_run:
             return {"ok": True, "source": "plan", "dry_run": True, "batch": picked}
 
         results = {"ok": True, "source": "plan", "processed": 0, "errors": 0, "items": []}
-        for it in picked:
+
+        # Runner with concurrency
+        sem = asyncio.Semaphore(workers)
+
+        async def run_one(it: Dict[str, Any]):
             argv = ["discover", "--query", it["query"], "--city", it["city"], "--limit", str(it["limit"])]
             if require_email is True:
                 argv += ["--require-email"]
             elif require_email is False:
                 argv += ["--no-require-email"]
-            try:
-                oc.invoke(argv)
+
+            async with sem:
+                try:
+                    # run blocking function in a thread
+                    await asyncio.to_thread(oc.invoke, argv)
+                    return {"argv": argv, "status": "ok"}
+                except Exception as e:
+                    log.error("[rotate] item failed argv=%s: %s\n%s", argv, e, traceback.format_exc())
+                    return {"argv": argv, "status": "error", "detail": str(e)}
+
+        tasks = [run_one(it) for it in picked]
+        for item_res in await asyncio.gather(*tasks, return_exceptions=False):
+            results["items"].append(item_res)
+            if item_res["status"] == "ok":
                 results["processed"] += 1
-                results["items"].append({"argv": argv, "status": "ok"})
-            except Exception as e:
-                # Log full traceback per item; continue processing others
-                log.error("[rotate] item failed argv=%s: %s\n%s", argv, e, traceback.format_exc())
+            else:
                 results["errors"] += 1
-                results["items"].append({"argv": argv, "status": "error", "detail": str(e)})
 
         results["meta"] = {
             "batch_n": batch_n,
             "day_seed": day_seed,
             "refreshed": bool(refresh),
+            "workers": workers,
+            "default_limit": default_limit,
+            "override_limit": limit,
         }
         return results
+
     except HTTPException:
         raise
     except Exception as e:

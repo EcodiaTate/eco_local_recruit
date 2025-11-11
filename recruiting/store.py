@@ -357,7 +357,7 @@ class RunItem:
 
 def create_run(target: date) -> Dict[str, Any]:
     cy = """
-    MERGE (r:ECO:LocalRun {date: date($d)})
+    MERGE (r:ECOLocalRun {date: date($d)})
     ON CREATE SET r.created_at = datetime()
     RETURN r
     """
@@ -388,7 +388,7 @@ def attach_draft_email(run, prospect: Dict[str, Any], kind: str, subject: str, b
 
 
 def freeze_run(run) -> None:
-    cy = "MERGE (r:ECO:LocalRun {date: date($d)}) SET r.frozen = true, r.frozen_at = datetime()"
+    cy = "MERGE (r:ECOLocalRun {date: date($d)}) SET r.frozen = true, r.frozen_at = datetime()"
     _run(cy, {"d": run["date"]})
 
 
