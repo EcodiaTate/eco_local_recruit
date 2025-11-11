@@ -391,7 +391,7 @@ def draft_first_touch(prospect: Dict[str, Any], *, trace_id: Optional[str] = Non
             
             "2. **The 'Why':** Use their 'category' and 'name' (the *idea* of their business) to make a *genuine-sounding connection*. "
             "Don't just repeat their name. Show them *why* a business like theirs is a perfect fit for a movement connecting youth with local, values-driven places. "
-            "Make them feel *seen*."
+            "Make them feel *seen*. Try including their business in the subject if you want to personalise it even more."
                 ],
         "prospect": _prospect_projection(prospect),
         "context_docs": docs,
