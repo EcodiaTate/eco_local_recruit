@@ -420,7 +420,7 @@ def draft_first_touch(prospect: Dict[str, Any], *, trace_id: Optional[str] = Non
     }
 
     try:
-        raw = generate_json(json.dumps(prompt, default=_json_default))
+        raw = generate_json(prompt, max_output_tokens=1000)
         subj, html = _coerce_subject_html(
             raw,
             (f"Quick hello from ECO Local!")
@@ -569,7 +569,7 @@ def draft_followup(prospect: Dict[str, Any], *, attempt_no: int, max_attempts: i
     }
 
     try:
-        raw = generate_json(json.dumps(prompt, default=_json_default))
+        raw = generate_json(prompt, max_output_tokens=1000)
         subj_model, html_model = _coerce_subject_html(raw, default_subj=subj_hint)
         subj = subj_hint  # lock to reply shape
         html = html_model

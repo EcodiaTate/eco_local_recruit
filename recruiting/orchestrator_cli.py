@@ -11,12 +11,11 @@ from urllib.parse import quote
 # ---------------- env / dotenv ----------------
 try:
     from dotenv import load_dotenv, find_dotenv
-    # Load from CWD first, then repo root (…/.env)
     load_dotenv(find_dotenv(usecwd=True))
     repo_root = Path(__file__).resolve().parents[1]
     load_dotenv(repo_root / ".env", override=False)
 except Exception:
-    pass  # works without python-dotenv
+    pass
 
 # ---------------- local imports ----------------
 from . import store
@@ -32,12 +31,10 @@ from .calendar_client import (
 from .calendar_client import _tz as _cal_tz  # type: ignore
 from .calendar_client import _build_calendar_service  # type: ignore
 from .config import settings
-from .tools import calendar_suggest_windows  # agentic, scored windows
-from .tools import semantic_docs, semantic_topk_for_thread  # semantic tests
+from .tools import calendar_suggest_windows
+from .tools import semantic_docs, semantic_topk_for_thread
 
-# --- LLM drafting (first touch lives in outreach) ---
 from .outreach import draft_first_touch as outreach_draft_first_touch  # type: ignore
-# IMPORTANT: do NOT swallow import errors here — we want the real followup generator.
 from .outreach import draft_followup as outreach_draft_followup  # type: ignore
 
 # ---- robust discovery-module loader (scrape/parse/qualify/profile) ----
@@ -46,8 +43,8 @@ import importlib.util
 import sys as _sys
 
 HERE = Path(__file__).resolve()
-PKG_DIR = HERE.parent            # /app/recruiting
-APP_ROOT = PKG_DIR.parent        # /app
+PKG_DIR = HERE.parent
+APP_ROOT = PKG_DIR.parent
 
 if str(APP_ROOT) not in _sys.path:
     _sys.path.insert(0, str(APP_ROOT))
@@ -327,18 +324,10 @@ def _list_unsub_values(to_email: str) -> tuple[Optional[str], Optional[str]]:
 # ---------- Outreach build/send ----------
 
 def cmd_build(args: argparse.Namespace) -> None:
-    """
-    Build a run for the date:
-    - First-touch drafts via outreach.draft_first_touch (LLM).
-    - Follow-ups for prospects due on that date (no-reply path) are drafted via outreach.draft_followup,
-      which includes its own resilient fallback. We do NOT use a separate CLI fallback.
-    """
-    store.ensure_followup_props()  # tiny guard, idempotent
-
+    store.ensure_followup_props()
     run_date = _today_or(args.date)
     run = store.create_run(run_date)
 
-    # First touches
     first_quota = store.get_first_touch_quota()
     first_prospects = store.select_prospects_for_first_touch(first_quota)
     print(f"[build] first-touch prospects: {len(first_prospects)}")
@@ -346,7 +335,6 @@ def cmd_build(args: argparse.Namespace) -> None:
         subj, body = outreach_draft_first_touch(p, trace_id="cli-build-first")
         store.attach_draft_email(run, p, "first", subj, body)
 
-    # Followups
     follow_days = store.get_followup_days()
     follow_prospects = store.select_prospects_for_followups(run_date, follow_days)
     print(f"[build] followup prospects: {len(follow_prospects)}")
@@ -354,7 +342,6 @@ def cmd_build(args: argparse.Namespace) -> None:
     for p in follow_prospects:
         attempt_no = int(p.get("attempt_count", 0)) + 1
         kind = f"followup{attempt_no}" if attempt_no < max_attempts else "final"
-
         try:
             subj, body = outreach_draft_followup(
                 p,
@@ -365,11 +352,7 @@ def cmd_build(args: argparse.Namespace) -> None:
         except Exception as e:
             print(f"[build][ERROR] followup draft failed for {p.get('email')} (attempt={attempt_no}/{max_attempts}): {e}")
             traceback.print_exc()
-            # Hard stop? No — skip this prospect for now so we don't inject the old generic fallback.
-            # Outreach has its own fallback; if we got here, something import/runtime level went wrong.
-            # We avoid sending a generic-looking follow-up.
             continue
-
         store.attach_draft_email(run, p, kind, subj, body)
 
     if args.freeze:
@@ -382,14 +365,7 @@ def cmd_build(args: argparse.Namespace) -> None:
 
 
 def cmd_send(args: argparse.Namespace) -> None:
-    """
-    Sends all drafts for the given date. After each send:
-      - mark_sent (draft + thread + basic stamps)
-      - mark_followup_sent (increments attempt_count + schedules next)
-    This handles both first touches and followups uniformly.
-    """
-    store.ensure_followup_props()  # idempotent
-
+    store.ensure_followup_props()
     run_date = _today_or(args.date)
     sent = 0
     for item in store.iter_run_items(run_date):
@@ -406,16 +382,12 @@ def cmd_send(args: argparse.Namespace) -> None:
                 list_unsubscribe_url=lu_url,
                 list_unsubscribe_mailto=lu_mailto,
             )
-
         store.mark_sent(item, message_id)
-        # Single source of truth for attempts + next_followup
         try:
             store.mark_followup_sent(to_addr, settings.ECO_LOCAL_FOLLOWUP_DAYS)
         except Exception as e:
             print(f"[send] WARN: could not schedule next follow-up for {to_addr}: {e}")
-
         sent += 1
-
     print(f"[send] processed={sent} dry_run={DRY_RUN}")
 
 # ---------- Inbox + holds hygiene ----------
@@ -547,7 +519,6 @@ def cmd_discover(args: argparse.Namespace) -> None:
         ) if (homepage_html or mailto_emails) else {}
         best_email = (parsed or {}).get("best_email")
 
-        # --- clean display name (LLM+heuristic safe) ---
         try:
             if hasattr(_qualify, "clean_business_name"):
                 cleaned = _qualify.clean_business_name(name=name, domain=domain, city=city_, parsed=parsed or {})
@@ -556,7 +527,6 @@ def cmd_discover(args: argparse.Namespace) -> None:
         except Exception:
             pass
 
-        # --- tiny category hint (super optional; best-effort) ---
         category_hint = None
         try:
             cats = (parsed or {}).get("categories") or (parsed or {}).get("tags") or []
@@ -609,7 +579,6 @@ def cmd_discover(args: argparse.Namespace) -> None:
         except Exception:
             print("[discover] warn: qualify_basic failed; score not persisted")
 
-        # persist profile with a tiny 'personalize' hint bundle (harmless if ignored)
         try:
             _profile.upsert_profile_for_prospect(
                 node,
@@ -617,8 +586,8 @@ def cmd_discover(args: argparse.Namespace) -> None:
                     "parsed": parsed,
                     "source": "discover",
                     "personalize": {
-                        "short_name": name,               # cleaned
-                        "category_hint": category_hint,   # optional
+                        "short_name": name,
+                        "category_hint": category_hint,
                     },
                 },
             )
@@ -644,6 +613,146 @@ def cmd_cal_promote(args: argparse.Namespace) -> None:
     print("[promote] id:", ev.get("id"), "| kind:",
           ((ev.get("extendedProperties") or {}).get("private") or {}).get("ecoLocalKind"),
           "|", ev.get("htmlLink"))
+
+# ---------- Simple plain-text Chat Completion (no schema) ----------
+
+from typing import Tuple
+from openai import OpenAI
+from openai import BadRequestError, APIStatusError, APIError, RateLimitError
+
+def _default_model() -> str:
+    return (os.getenv("LLM_MODEL") or "gpt-4o").strip()
+
+def _chat_text_once(
+    *,
+    prompt: str,
+    model: str,
+    system: Optional[str],
+    max_tokens: int,
+    temperature: Optional[float],
+    force_text: bool,
+    use_max_completion: bool,
+) -> Tuple[str, Optional[str], bool, bool]:
+    """
+    Returns (text, finish_reason, bad_param_retryable, temp_retryable)
+    bad_param_retryable -> we should try alternate token param or drop response_format
+    temp_retryable -> we should retry with temperature=None
+    """
+    client = OpenAI()
+    messages: List[Dict[str, str]] = []
+    if system:
+        messages.append({"role": "system", "content": str(system)})
+    messages.append({"role": "user", "content": str(prompt)})
+
+    kwargs: Dict[str, Any] = {"model": model, "messages": messages}
+    if force_text:
+        kwargs["response_format"] = {"type": "text"}  # nudge models to return text content
+
+    if use_max_completion:
+        kwargs["max_completion_tokens"] = max_tokens
+    else:
+        kwargs["max_tokens"] = max_tokens
+
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+
+    try:
+        resp = client.chat.completions.create(**kwargs)  # type: ignore[arg-type]
+        choice = resp.choices[0]
+        text = (getattr(choice.message, "content", "") or "")
+        finish = getattr(choice, "finish_reason", None)
+        return str(text), (str(finish) if finish else None), False, False
+    except BadRequestError as e:
+        msg = (getattr(e, "message", str(e)) or "").lower()
+        bad_param_retryable = (
+            "unsupported parameter" in msg
+            and ("max_tokens" in msg or "max_completion_tokens" in msg or "response_format" in msg)
+        )
+        temp_retryable = ("unsupported value" in msg and "temperature" in msg)
+        return "", None, bad_param_retryable, temp_retryable
+    except (RateLimitError, APIStatusError, APIError):
+        return "", None, False, False
+    except Exception:
+        return "", None, False, False
+
+def _chat_text(
+    *,
+    prompt: str,
+    model: Optional[str] = None,
+    system: Optional[str] = None,
+    max_tokens: int = 800,
+    temperature: Optional[float] = None,
+) -> Tuple[str, Optional[str]]:
+    mdl = (model or _default_model()).strip()
+
+    # Try: response_format=text + max_completion_tokens
+    text, finish, bad_param_retry, temp_retry = _chat_text_once(
+        prompt=prompt, model=mdl, system=system, max_tokens=max_tokens,
+        temperature=temperature, force_text=True, use_max_completion=True,
+    )
+    if text:
+        return text, finish
+
+    # If temperature not accepted, retry without temperature (same params)
+    if temp_retry:
+        text, finish, bad_param_retry2, _ = _chat_text_once(
+            prompt=prompt, model=mdl, system=system, max_tokens=max_tokens,
+            temperature=None, force_text=True, use_max_completion=True,
+        )
+        if text:
+            return text, finish
+        bad_param_retry = bad_param_retry or bad_param_retry2
+
+    # If bad param (e.g., max_completion_tokens or response_format unsupported), try without response_format and with max_tokens
+    if bad_param_retry:
+        text, finish, bad_param_retry3, temp_retry3 = _chat_text_once(
+            prompt=prompt, model=mdl, system=system, max_tokens=max_tokens,
+            temperature=temperature, force_text=False, use_max_completion=False,
+        )
+        if text:
+            return text, finish
+        if temp_retry3:
+            text, finish, *_ = _chat_text_once(
+                prompt=prompt, model=mdl, system=system, max_tokens=max_tokens,
+                temperature=None, force_text=False, use_max_completion=False,
+            )
+            if text:
+                return text, finish
+
+    # As a last nudge, add a strong system hint and try once more
+    strong_sys = (system + " Reply in plain text only.") if system else "Reply in plain text only."
+    text, finish, *_ = _chat_text_once(
+        prompt=prompt, model=mdl, system=strong_sys, max_tokens=max_tokens,
+        temperature=None, force_text=False, use_max_completion=True,
+    )
+    return text, finish
+
+def cmd_chat(args: argparse.Namespace) -> None:
+    # Read prompt from --prompt or file/stdin
+    src = args.prompt
+    if src is None:
+        if args.input == "-":
+            import sys as _sys
+            src = _sys.stdin.read()
+        elif args.input:
+            p = Path(args.input)
+            if not p.exists():
+                print(f"error: input file not found: {p}")
+                return
+            src = p.read_text(encoding="utf-8")
+    if not src or not str(src).strip():
+        print("error: no prompt provided (use --prompt, --input FILE, or pipe via STDIN)")
+        return
+
+    text, finish = _chat_text(
+        prompt=src,
+        model=args.model,
+        system=args.system,
+        max_tokens=args.max_tokens,
+        temperature=args.temperature,
+    )
+    # Always print something so it's obvious if content was empty
+    print(text.strip() if text and text.strip() else "(no content)")
 
 # ---------- Parser ----------
 
@@ -799,7 +908,7 @@ def build_parser() -> argparse.ArgumentParser:
     cl.add_argument("--no-drop-future-if-confirmed", action="store_true")
     cl.set_defaults(func=cmd_cleanup_holds)
 
-    # Discovery
+    # --- Discovery ---
     dp = sub.add_parser("discover", help="LLM-powered business discovery → parse → score → profile (with min-fit gate)")
     dp.add_argument("--query", required=True)
     dp.add_argument("--city", required=True)
@@ -808,6 +917,16 @@ def build_parser() -> argparse.ArgumentParser:
     on.add_argument("--require-email", dest="require_email", action="store_true", default=REQUIRE_EMAIL_DEFAULT)
     on.add_argument("--no-require-email", dest="require_email", action="store_false")
     dp.set_defaults(func=cmd_discover)
+
+    # --- Plain text chat completion (super simple) ---
+    ch = sub.add_parser("chat", help="Plain text chat completion (no schema). Prints raw text.")
+    ch.add_argument("--prompt", type=str, help="Inline prompt text. If omitted, use --input or STDIN.")
+    ch.add_argument("--input", type=str, help="Read prompt from FILE or '-' for STDIN.")
+    ch.add_argument("--model", type=str, help="Model name (defaults to env LLM_MODEL or gpt-4o).")
+    ch.add_argument("--system", type=str, help="Optional system message (style/role).")
+    ch.add_argument("--max-tokens", type=int, default=800, help="Max completion tokens (or equivalent).")
+    ch.add_argument("--temperature", type=float, help="Optional temperature. Leave unset for strict models.")
+    ch.set_defaults(func=cmd_chat)
 
     return p
 
@@ -824,7 +943,7 @@ def main() -> None:
             pass
 
 
-def invoke(argv: list[str]) -> int:
+def invoke(argv: List[str]) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
