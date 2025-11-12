@@ -512,7 +512,6 @@ def _pre_fit_score(parsed: Dict[str, Any], domain: Optional[str]) -> Tuple[float
         pass
     return _heuristic_pre_fit(parsed, domain), "heuristic_pre_fit"
 
-
 def cmd_discover(args: argparse.Namespace) -> None:
     store.ensure_dedupe_constraints()
 
@@ -547,6 +546,26 @@ def cmd_discover(args: argparse.Namespace) -> None:
             extra_emails=mailto_emails
         ) if (homepage_html or mailto_emails) else {}
         best_email = (parsed or {}).get("best_email")
+
+        # --- clean display name (LLM+heuristic safe) ---
+        try:
+            if hasattr(_qualify, "clean_business_name"):
+                cleaned = _qualify.clean_business_name(name=name, domain=domain, city=city_, parsed=parsed or {})
+                if cleaned:
+                    name = cleaned
+        except Exception:
+            pass
+
+        # --- tiny category hint (super optional; best-effort) ---
+        category_hint = None
+        try:
+            cats = (parsed or {}).get("categories") or (parsed or {}).get("tags") or []
+            if isinstance(cats, list) and cats:
+                category_hint = str(cats[0])[:40]
+            elif isinstance((parsed or {}).get("category"), str):
+                category_hint = str(parsed.get("category"))[:40]
+        except Exception:
+            category_hint = None
 
         try:
             pre_fit, pre_reason = _pre_fit_score(parsed or {}, domain)
@@ -590,8 +609,19 @@ def cmd_discover(args: argparse.Namespace) -> None:
         except Exception:
             print("[discover] warn: qualify_basic failed; score not persisted")
 
+        # persist profile with a tiny 'personalize' hint bundle (harmless if ignored)
         try:
-            _profile.upsert_profile_for_prospect(node, extra={"parsed": parsed, "source": "discover"})
+            _profile.upsert_profile_for_prospect(
+                node,
+                extra={
+                    "parsed": parsed,
+                    "source": "discover",
+                    "personalize": {
+                        "short_name": name,               # cleaned
+                        "category_hint": category_hint,   # optional
+                    },
+                },
+            )
         except Exception:
             pass
 
