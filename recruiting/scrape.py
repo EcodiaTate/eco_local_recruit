@@ -14,7 +14,6 @@ from urllib.parse import urlparse, urljoin
 import httpx
 from bs4 import BeautifulSoup
 
-# Places is optional; discovery still works via Google CSE if Places key not set
 from . import places as _places  # type: ignore
 
 LOG = logging.getLogger("eco_local.scrape")
@@ -27,17 +26,25 @@ def _d(msg: str) -> None:
         LOG.info(msg)
 
 # -------------------- Config / Keys --------------------
-
 GOOGLE_API_KEY = os.getenv("GENERAL_GOOGLE_API_KEY")
 GOOGLE_PSE_CX  = os.getenv("GOOGLE_PSE_CX")
 
 USE_BROWSER         = (os.getenv("ECO_LOCAL_USE_BROWSER", "1").strip().lower() in {"1","true","yes","on"})
-BROWSER_MAX_PAGES   = int(os.getenv("ECO_LOCAL_BROWSER_MAX_PAGES", "12"))
-BROWSER_TIMEOUT_MS  = int(os.getenv("ECO_LOCAL_BROWSER_TIMEOUT_MS", "15000"))
+# Hard cap all crawl paths to ~4 pages/site by default
+MAX_PAGES_PER_SITE  = int(os.getenv("ECO_LOCAL_MAX_PAGES", "4"))
+
+# Keep browser fallback but timebox it hard
+BROWSER_MAX_PAGES   = int(os.getenv("ECO_LOCAL_BROWSER_MAX_PAGES", str(MAX_PAGES_PER_SITE)))
+BROWSER_TIMEOUT_MS  = int(os.getenv("ECO_LOCAL_BROWSER_TIMEOUT_MS", "12000"))
+
+# CSE crawl depth for email sweep (limit hard)
+CSE_EMAIL_MAX_PAGES = int(os.getenv("ECO_LOCAL_CSE_MAX_PAGES", "1"))
+
 GUESS_GENERIC       = (os.getenv("ECO_LOCAL_GUESS_GENERIC", "0").strip().lower() in {"1","true","yes","on"})
 
 _USER_AGENT = "EcodiaEcoLocal/scrape (https://ecodia.au)"
-_TIMEOUT = httpx.Timeout(20.0, connect=10.0)
+_TIMEOUT = httpx.Timeout(12.0, connect=5.0)
+_LIMITS  = httpx.Limits(max_connections=64, max_keepalive_connections=16)
 
 _COMMON_CONTACT_PATHS = [
     "/contact", "/contact-us", "/contacts",
@@ -61,13 +68,11 @@ _GENERIC_INBOXES = ("info@", "hello@", "contact@", "enquiries@", "admin@", "offi
 
 
 # -------------------- HTTP --------------------
-
 def _client() -> httpx.Client:
-    return httpx.Client(timeout=_TIMEOUT, headers={"User-Agent": _USER_AGENT})
+    return httpx.Client(timeout=_TIMEOUT, headers={"User-Agent": _USER_AGENT}, limits=_LIMITS)
 
 
 # -------------------- Domain helpers --------------------
-
 def _is_gov_domain(domain: Optional[str]) -> bool:
     if not domain:
         return False
@@ -103,7 +108,6 @@ def _base_candidates(url_or_domain: Optional[str]) -> List[str]:
 
 
 # -------------------- Discovery (Places + Google CSE) --------------------
-
 def _compose_geo_phrase(city: str) -> str:
     c = (city or "").strip()
     if not c:
@@ -239,7 +243,6 @@ def discover_places(query: str, city: str, limit: int = 10) -> List[Dict[str, An
 
 
 # -------------------- Fetching HTML + contact pages --------------------
-
 def fetch_homepage(domain_or_url: Optional[str]) -> str:
     for base in _base_candidates(domain_or_url):
         try:
@@ -282,10 +285,12 @@ def _discover_contact_like_links(home_html: str, base: str) -> List[str]:
         if url not in seen:
             seen.add(url); out.append(url)
 
+    # seed with common paths; we'll cap usage later by MAX_PAGES_PER_SITE
     for path in _COMMON_CONTACT_PATHS:
         url = urljoin(base + "/", path.lstrip("/"))
         if url not in seen:
             seen.add(url); out.append(url)
+    # don’t explode: keep a modest pool
     return out[:24]
 
 def _collect_pdf_links(html: str, base: str) -> List[str]:
@@ -302,7 +307,7 @@ def _collect_pdf_links(html: str, base: str) -> List[str]:
     for u in urls:
         if u not in seen:
             seen.add(u); out.append(u)
-    return out[:10]
+    return out[:4]  # respect overall light touch
 
 def _extract_emails_from_pdf_bytes(raw: bytes) -> List[str]:
     emails: List[str] = []
@@ -331,22 +336,29 @@ def fetch_common_contact_pages(domain_or_url: Optional[str]) -> List[Tuple[str, 
     bases = _base_candidates(domain_or_url)
     if not bases:
         return pages
+    total_pages = 0
     with _client() as c:
         for base in bases:
+            if total_pages >= MAX_PAGES_PER_SITE:
+                break
             home_html = ""
             try:
                 r = c.get(base, follow_redirects=True)
                 if r.status_code < 400 and (r.text or "").strip():
                     home_html = r.text
-                    pages.append((base, home_html))
+                    pages.append((base, home_html)); total_pages += 1
+                    if total_pages >= MAX_PAGES_PER_SITE:
+                        break
                     pdfs = _collect_pdf_links(home_html, base)
                     for purl in pdfs:
+                        if total_pages >= MAX_PAGES_PER_SITE:
+                            break
                         try:
                             rr = c.get(purl, follow_redirects=True)
                             if rr.status_code < 400 and rr.headers.get("content-type","").lower().startswith("application/pdf"):
                                 emails = _extract_emails_from_pdf_bytes(rr.content)
                                 if emails:
-                                    pages.append((purl, "\n".join(emails)))
+                                    pages.append((purl, "\n".join(emails))); total_pages += 1
                         except Exception:
                             pass
             except Exception:
@@ -356,35 +368,44 @@ def fetch_common_contact_pages(domain_or_url: Optional[str]) -> List[Tuple[str, 
             if not discovered:
                 discovered = _sitemap_candidates(base) or []
 
-            for url in discovered[:24]:
+            for url in discovered:
+                if total_pages >= MAX_PAGES_PER_SITE:
+                    break
                 try:
                     if any(tp in url.lower() for tp in _THIRD_PARTY_DOMAINS):
                         continue
                     r = c.get(url, follow_redirects=True)
                     if r.status_code < 400 and (r.text or "").strip():
-                        pages.append((url, r.text))
+                        pages.append((url, r.text)); total_pages += 1
+                        if total_pages >= MAX_PAGES_PER_SITE:
+                            break
                         pdfs = _collect_pdf_links(r.text, base)
                         for purl in pdfs:
+                            if total_pages >= MAX_PAGES_PER_SITE:
+                                break
                             try:
                                 rr = c.get(purl, follow_redirects=True)
                                 if rr.status_code < 400 and rr.headers.get("content-type","").lower().startswith("application/pdf"):
                                     emails = _extract_emails_from_pdf_bytes(rr.content)
                                     if emails:
-                                        pages.append((purl, "\n".join(emails)))
+                                        pages.append((purl, "\n".join(emails))); total_pages += 1
                             except Exception:
                                 pass
                 except Exception:
                     continue
 
-            if not discovered:
+            if not discovered and total_pages < MAX_PAGES_PER_SITE:
                 for path in _COMMON_CONTACT_PATHS:
+                    if total_pages >= MAX_PAGES_PER_SITE:
+                        break
                     url = urljoin(base + "/", path.lstrip("/"))
                     try:
                         r = c.get(url, follow_redirects=True)
                         if r.status_code < 400 and (r.text or "").strip():
-                            pages.append((url, r.text))
+                            pages.append((url, r.text)); total_pages += 1
                     except Exception:
                         continue
+
             if pages:
                 break
 
@@ -413,7 +434,7 @@ def _sitemap_candidates(base: str) -> List[str]:
                         urls.append(u.strip())
                 if not urls:
                     submaps = [e.text for e in root.findall(".//sm:sitemap/sm:loc", ns)] or [e.text for e in root.findall(".//loc")]
-                    for smu in (submaps or [])[:5]:
+                    for smu in (submaps or [])[:3]:
                         try:
                             with _client() as c:
                                 rr = c.get(smu, follow_redirects=True)
@@ -432,11 +453,10 @@ def _sitemap_candidates(base: str) -> List[str]:
             continue
     hints = [u for u in urls if re.search(r"/(contact|about|team|find-us|get-in-touch|privacy|menu|functions|events|catering|faq|faqs)\b", u, re.I)]
     others = [u for u in urls if u not in hints]
-    return (hints + others)[:24]
+    return (hints + others)[:12]
 
 
 # -------------------- Email harvesting --------------------
-
 _EMAIL_RE_MAILTO = re.compile(r"mailto:([^\"'<>\\)\s]+)", re.I)
 _TEXT_EMAIL_RE   = re.compile(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.I)
 
@@ -538,9 +558,11 @@ def harvest_emails_from_html(html: str) -> List[str]:
     ordered = _filter_false_positives(ordered)
     return ordered
 
-def _cse_email_harvest_for_domain(domain: str, max_pages: int = 3) -> List[str]:
+def _cse_email_harvest_for_domain(domain: str, max_pages: int | None = None) -> List[str]:
     if not (GOOGLE_API_KEY and GOOGLE_PSE_CX):
         return []
+    if max_pages is None:
+        max_pages = CSE_EMAIL_MAX_PAGES
     queries = [
         f'site:{domain} "@"',
         f'site:{domain} contact',
@@ -636,8 +658,8 @@ def harvest_emails_for_domain(domain_or_url: Optional[str]) -> List[str]:
     if not emails:
         dom = _normalize_domain(domain_or_url)
         if dom:
-            _d(f"[harvest] CSE fallback for {dom}")
-            emails = _cse_email_harvest_for_domain(dom)
+            _d(f"[harvest] CSE fallback for {dom} (max_pages={CSE_EMAIL_MAX_PAGES})")
+            emails = _cse_email_harvest_for_domain(dom, max_pages=CSE_EMAIL_MAX_PAGES)
 
     if not emails and GUESS_GENERIC:
         dom = _normalize_domain(domain_or_url)

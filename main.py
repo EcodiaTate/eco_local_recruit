@@ -55,7 +55,6 @@ if not logging.getLogger().handlers:
 app = FastAPI(title="ECO Local Recruit Service", version="1.0.0", docs_url="/")
 
 # ---------------- CORS ----------------
-# NOTE: Cloud Scheduler / Cloud Run calls are server-to-server; CORS is only for browsers.
 ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://localhost:3001",
@@ -103,6 +102,7 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 log.info("Mounted static directory at /static from %s", STATIC_DIR)
 
 # ---------------- TZ ----------------
+from recruiting.timezones import resolve_tz
 LOCAL_TZ = resolve_tz(settings.LOCAL_TZ or "Australia/Brisbane")
 
 def _days_since_epoch_au(dt: Optional[date] = None) -> int:
@@ -118,7 +118,6 @@ def healthz() -> Dict[str, Any]:
 
 @app.get("/readyz")
 def readyz() -> Dict[str, Any]:
-    # Add deeper checks here if needed (neo4j ping, etc.)
     return {"ok": True, "ts": time.time()}
 
 # ---------------- Outreach (build/send) ----------------
@@ -192,7 +191,7 @@ async def signup_webhook(req: Request) -> Dict[str, bool]:
     return {"ok": True}
 
 # ──────────────────────────────────────────────────────────────────────────────
-# PLAN-ONLY GENERATOR (single stream)
+# PLAN-ONLY GENERATOR (single stream) + time-budgeted rotate
 # ──────────────────────────────────────────────────────────────────────────────
 _PLAN_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None, "etag": None}
 _PLAN_TTL_SECONDS = int(os.getenv("ECO_LOCAL_DISCOVER_PLAN_TTL", "600"))
@@ -228,14 +227,6 @@ def _fetch_json_url(url: str, cache: Dict[str, Any], ttl: int) -> Optional[Any]:
         return None
 
 def _load_generator_plan(*, force_refresh: bool = False) -> Dict[str, Any]:
-    """
-    Single source of truth. If this fails, we error.
-    Priority:
-      1) File ECO_LOCAL_DISCOVER_PLAN_FILE (default: /config/discover_plan.json if /config exists)
-      2) Env  ECO_LOCAL_DISCOVER_PLAN_JSON (inline JSON)
-      3) URL  ECO_LOCAL_DISCOVER_PLAN_URL  (default: /config/discover_rotation.json)
-    """
-    # 1) file (prefer /config mount automatically)
     default_file = "/config/discover_plan.json" if os.path.isdir("/config") else ""
     path = os.getenv("ECO_LOCAL_DISCOVER_PLAN_FILE", default_file or "")
     try:
@@ -247,7 +238,6 @@ def _load_generator_plan(*, force_refresh: bool = False) -> Dict[str, Any]:
     except Exception as e:
         log.warning("[plan] file load failed (%s): %s", path, e)
 
-    # 2) env
     raw = os.getenv("ECO_LOCAL_DISCOVER_PLAN_JSON")
     if raw:
         try:
@@ -257,7 +247,6 @@ def _load_generator_plan(*, force_refresh: bool = False) -> Dict[str, Any]:
         except Exception as e:
             log.warning("[plan] env JSON invalid: %s", e)
 
-    # 3) URL (default to a local config URL path so it works behind IAP/reverse-proxy)
     url = os.getenv("ECO_LOCAL_DISCOVER_PLAN_URL", "/config/discover_rotation.json")
     data = _fetch_json_url(url, _PLAN_CACHE, _PLAN_TTL_SECONDS)
     if isinstance(data, dict) and data:
@@ -363,7 +352,8 @@ def _synth_queries_from_plan(plan: Dict[str, Any], day_seed: Optional[str], batc
         batch.append({"query": q, "city": city, "limit": default_limit})
 
     return batch
-# single-stream endpoint (bigger & faster by default)
+
+# single-stream endpoint (bigger & faster by default) with time budget + waves
 @app.api_route("/eco-local/recruit/discover/rotate", methods=["GET", "POST"])
 async def discover_rotate(
     request: Request,
@@ -371,15 +361,14 @@ async def discover_rotate(
     require_email: bool | None = Query(default=None, description="Override require-email gate"),
     limit: int | None = Query(default=None, description="Override per-run limit (applies to all items)"),
     refresh: int = Query(default=0, description="Force refresh of plan (1=yes)"),
-    # 🚀 process lots more by default
     batch_n: int = Query(default=200, description="How many items to process"),
-    # new: use this when 'limit' isn't provided
     default_limit: int = Query(default=50, description="Per-item limit when 'limit' is not provided"),
-    # new: light concurrency for speed (threaded, safe for blocking calls)
-    workers: int = Query(default=8, ge=1, le=64, description="Max concurrent item runners"),
+    workers: int = Query(default=24, ge=1, le=64, description="Max concurrent item runners"),
+    job_budget_s: int = Query(default=25*60, ge=60, le=29*60, description="Hard wall-clock budget (seconds)"),
     dry_run: int = Query(default=0, description="If 1, don't invoke; just return the batch"),
 ):
     import asyncio
+    from time import monotonic
 
     body: Dict[str, Any] = {}
     if request.method == "POST":
@@ -394,8 +383,9 @@ async def discover_rotate(
     dry_run       = int(body.get("dry_run", dry_run))
     default_limit = int(body.get("default_limit", default_limit))
     workers       = int(body.get("workers", workers))
+    job_budget_s  = int(body.get("job_budget_s", job_budget_s))
 
-    # Guardrails (avoid accidental 10k blowups)
+    # Guardrails
     batch_n = max(1, min(batch_n, 1000))
     default_limit = max(1, min(default_limit, 500))
 
@@ -405,11 +395,9 @@ async def discover_rotate(
 
         # Apply limit defaults/overrides
         if limit is not None:
-            # One override for all items
             for it in picked:
                 it["limit"] = int(limit)
         else:
-            # Only set if item lacks a limit
             for it in picked:
                 if not it.get("limit"):
                     it["limit"] = default_limit
@@ -419,8 +407,9 @@ async def discover_rotate(
 
         results = {"ok": True, "source": "plan", "processed": 0, "errors": 0, "items": []}
 
-        # Runner with concurrency
+        # Concurrency + time budget
         sem = asyncio.Semaphore(workers)
+        t0 = monotonic()
 
         async def run_one(it: Dict[str, Any]):
             argv = ["discover", "--query", it["query"], "--city", it["city"], "--limit", str(it["limit"])]
@@ -428,23 +417,41 @@ async def discover_rotate(
                 argv += ["--require-email"]
             elif require_email is False:
                 argv += ["--no-require-email"]
-
             async with sem:
-                try:
-                    # run blocking function in a thread
-                    await asyncio.to_thread(oc.invoke, argv)
-                    return {"argv": argv, "status": "ok"}
-                except Exception as e:
-                    log.error("[rotate] item failed argv=%s: %s\n%s", argv, e, traceback.format_exc())
-                    return {"argv": argv, "status": "error", "detail": str(e)}
+                await asyncio.to_thread(oc.invoke, argv)
+                return {"argv": argv, "status": "ok"}
 
-        tasks = [run_one(it) for it in picked]
-        for item_res in await asyncio.gather(*tasks, return_exceptions=False):
-            results["items"].append(item_res)
-            if item_res["status"] == "ok":
-                results["processed"] += 1
-            else:
-                results["errors"] += 1
+        # process in waves so we can exit on budget
+        WAVE = max(1, workers * 2)
+        attempted = 0
+        for i in range(0, len(picked), WAVE):
+            # budget left?
+            elapsed = time.monotonic() - t0
+            if elapsed >= job_budget_s:
+                break
+            remaining = max(1, int(job_budget_s - elapsed))
+
+            batch = picked[i : i + WAVE]
+            tasks = [asyncio.create_task(run_one(it)) for it in batch]
+
+            try:
+                # Drain this wave with remaining budget
+                for coro in asyncio.as_completed(tasks, timeout=remaining):
+                    try:
+                        item_res = await coro
+                        results["items"].append(item_res)
+                        results["processed"] += 1
+                        attempted += 1
+                        if attempted % 10 == 0:
+                            log.info("[rotate] progress attempted=%d processed=%d elapsed=%ds",
+                                     attempted, results["processed"], int(time.monotonic() - t0))
+                    except Exception as e:
+                        results["items"].append({"status": "error", "detail": str(e)})
+                        results["errors"] += 1
+            except asyncio.TimeoutError:
+                for t in tasks:
+                    t.cancel()
+                break
 
         results["meta"] = {
             "batch_n": batch_n,
@@ -453,6 +460,9 @@ async def discover_rotate(
             "workers": workers,
             "default_limit": default_limit,
             "override_limit": limit,
+            "job_budget_s": job_budget_s,
+            "elapsed_s": int(time.monotonic() - t0),
+            "attempted": attempted,
         }
         return results
 
