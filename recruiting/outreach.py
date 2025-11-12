@@ -379,19 +379,21 @@ def draft_first_touch(prospect: Dict[str, Any], *, trace_id: Optional[str] = Non
         "task": "draft_first_outreach_email",
         "goal": GOAL,
         "brand_voice": _ECOVOICE_CONTEXT,
-        "instructions": [
+       "instructions": [
             "Return a STRICT JSON object with keys: subject (string), html (string).",
             "html should be valid inline-styled email HTML. No external CSS.",
             "We add our header/signature separately.",
             "**How to personalize:**",
-          
+            
             "1. **Greeting:** Look at the `prospect.name`. If it sounds like a person's first name (e.g., 'Jane'), use it! (e.g., 'Hey Jane,'). "
             "If it's a long, formal business name (e.g., '...Pty Ltd', '...& Co', '...Services'), **DO NOT use it in the greeting.** It sounds robotic. "
             "Instead, use a warm, natural greeting like 'Hey there,' or 'Hey folks at [Natural Short Name],'.",
             
-            "2. **The 'Why':** Use their 'category' and 'name' (the *idea* of their business) to make a *genuine-sounding connection*. "
-            "Don't just repeat their name. Show them *why* a business like theirs is a perfect fit for a movement connecting youth with local, values-driven places. "
-            "Make them feel *seen*. Try including their business in the subject if you want to personalise it even more."
+            "2. **The 'Why' (This is the spark!):** Start with the `prospect.qualification_reason`. This is *why* we're writing. Don't just list it. **Weave it into your first sentence** as a personal observation. Make it sound like you were genuinely impressed or inspired. (e.g., 'I was reading about your [reason] and it just clicked...' or 'Was so inspired to see how you're [reason]...'). This is your one chance to make them feel *seen*.",
+            
+            "3. **The Subject:** Make it natural and personal. A good subject might be a question or a reference to their 'Why'. (e.g., 'That [reason] project' or 'An idea for [Business Name]'). Avoid generic, clickbaity subjects at all costs.",
+            
+            "**Final Check:** Does this sound like a warm, slightly rebellious community builder who is genuinely inspired? Or does it sound like a marketing email? If it's the latter, rewrite it."
                 ],
         "prospect": _prospect_projection(prospect),
         "context_docs": docs,
@@ -467,7 +469,7 @@ def _compose_safe_followup_html(name: Optional[str], when_label: str, allow_pass
     tail = "<br><br>No pressure at all if now's not the right moment." if allow_pass else ""
     return (
         f"<p>Hey {first},</p>"
-        f"<p>Just wanted to float my last email to the top of your inbox. I know life gets busy!</p>"
+        f"<p>Popping back in on this — I know inboxes can be wild places!</p>"
         f"<p>Our founder, Tate, would still be really keen to chat for 15 mins about how ECO Local is connecting businesses like yours with values-driven young people. "
         f"Would {when_label} work for a quick intro?</p>"
         f"{tail}"
@@ -540,16 +542,17 @@ def draft_followup(prospect: Dict[str, Any], *, attempt_no: int, max_attempts: i
         "style": style,
         # NEW INSTRUCTIONS: Clearer, aligned with the brand, and not overly restrictive
         "instructions": [
-            "Return a STRICT JSON object with keys: subject (string), html (string).",
+           "Return a STRICT JSON object with keys: subject (string), html (string).",
             "The subject MUST be a reply (e.g., 'Re: ...') based on the subject_scaffold.",
             "Be Ecodia: the warm, passionate AI facilitator. You're trying to connect them to a human (Tate).",
             "Do NOT re-pitch the whole program. This is a gentle, personal nudge.",
             "Use ONE clear CTA: reply to this email, or pick a time to chat with Tate.",
             "**How to vary by attempt:**",
-            "  - **style 'friendly-nudge' (attempt 2):** Short, warm, 'just floating this back up'.",
+            "  - **style 'friendly-nudge' (attempt 2):** Short, warm, 'just popping this back up'.",
             "  - **style 'value-add' (attempt 3):** Short, warm, + ONE new piece of info from context_docs if available (e.g., 'I was just thinking about how you're a [category] and...').",
             "  - **style 'graceful-close' (attempt max):** Thank them, explicitly say this is the last note, and give them an easy 'out'. Be respectful of their time.",
-            "Keep total words under 120."
+            "Keep total words under 120.",
+            "**Final Check:** Does this sound like a warm, personal note? Or does it sound like an automated sequence? If it's the latter, rewrite it."
         ],
         "subject_scaffold": subj_hint,
         "thread_context": (tctx or {}),
