@@ -128,23 +128,51 @@ def _to_messages_for_text(prompt: Any, system: Optional[str]) -> List[Dict[str, 
     # object → JSON string
     msgs.append({"role": "user", "content": json.dumps(prompt, ensure_ascii=False, separators=(",", ":"))})
     return msgs
-
 def _to_messages_for_json(prompt: Any) -> List[Dict[str, str]]:
-    # Ensure a system hint that demands JSON (works for both APIs)
-    msgs: List[Dict[str, str]] = [{"role": "system", "content": "Return ONLY a valid JSON object. No prose."}]
+    # Always add a JSON-only guard system msg
+    msgs: List[Dict[str, str]] = [
+        {"role": "system", "content": "Return ONLY a valid JSON object. No prose."}
+    ]
+
     if isinstance(prompt, list):
         for item in prompt:
-            if isinstance(item, dict) and item.get("role") and item.get("content") is not None:
+            if not isinstance(item, dict):
+                continue
+
+            # 1) Already-shaped chat messages
+            if item.get("role") and item.get("content") is not None:
                 content = item["content"]
                 if not isinstance(content, str):
                     content = json.dumps(content, ensure_ascii=False, separators=(",", ":"))
                 msgs.append({"role": str(item["role"]), "content": str(content)})
+                continue
+
+            # 2) Our {system, user} pattern from llm_flow
+            if "system" in item or "user" in item:
+                sys_txt = item.get("system")
+                usr = item.get("user")
+                if sys_txt:
+                    msgs.append({"role": "system", "content": str(sys_txt)})
+                if usr is not None:
+                    if not isinstance(usr, str):
+                        usr = json.dumps(usr, ensure_ascii=False, separators=(",", ":"))
+                    msgs.append({"role": "user", "content": usr})
+                continue
+
         return msgs
+
+    # Non-list prompt: keep old behaviour
     if isinstance(prompt, str):
         msgs.append({"role": "user", "content": prompt})
         return msgs
-    msgs.append({"role": "user", "content": json.dumps(prompt, ensure_ascii=False, separators=(",", ":"))})
+
+    # Object → single JSON blob as user
+    msgs.append({
+        "role": "user",
+        "content": json.dumps(prompt, ensure_ascii=False, separators=(",", ":")),
+    })
     return msgs
+
 
 # ─────────────────────────────────────────────────────────
 # Core request shims

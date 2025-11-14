@@ -8,7 +8,6 @@ import uuid
 import socket
 import pathlib
 import logging
-import urllib.parse
 from typing import List, Tuple, Optional, Dict, Union, Mapping
 from email.message import EmailMessage
 from email.utils import parseaddr
@@ -17,18 +16,22 @@ import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
 from .config import settings
+from .unsub_links import build_unsub_url
 
 # Optional: allow typing against your ICSSpec without strict import-time cycles
 try:
     from .calendar_client import ICSSpec as _ICSSpec  # type: ignore
     from .calendar_client import build_ics as _build_ics_file  # type: ignore
-except Exception:
+except Exception:  # pragma: no cover - optional at import
     _ICSSpec = None
     _build_ics_file = None  # type: ignore
 
 log = logging.getLogger(__name__)
+if not logging.getLogger().handlers:
+    logging.basicConfig(level=logging.INFO)
 
 _ses = boto3.client("ses", region_name=settings.SES_REGION)
+
 
 # ─────────────────────────────────────────────────────────
 # Helpers
@@ -37,9 +40,11 @@ _ses = boto3.client("ses", region_name=settings.SES_REGION)
 def _bare(addr: str) -> str:
     return parseaddr(addr)[1] or addr
 
+
 def _make_message_id(from_addr: str) -> str:
     domain = (from_addr.split("@", 1)[1] if "@" in from_addr else socket.getfqdn()) or "localhost"
     return f"<{int(time.time())}.{uuid.uuid4().hex}@{domain}>"
+
 
 def _save_eml_if_enabled(raw_bytes: bytes, subject: str) -> None:
     if os.getenv("ECO_LOCAL_SAVE_EML", "").lower() not in {"1", "true", "yes"}:
@@ -53,6 +58,7 @@ def _save_eml_if_enabled(raw_bytes: bytes, subject: str) -> None:
         log.info("[ses] wrote debug EML: %s", str(path))
     except Exception:
         log.exception("[ses] failed to write debug EML")
+
 
 def _coerce_ics(ics: Optional[Union[Tuple[str, bytes], object]]) -> Optional[Tuple[str, bytes]]:
     """
@@ -68,10 +74,10 @@ def _coerce_ics(ics: Optional[Union[Tuple[str, bytes], object]]) -> Optional[Tup
             fn, content = _build_ics_file(ics)  # type: ignore[arg-type]
             return (fn, content)
         except Exception:
+            log.exception("[ses] failed to build ICS from ICSSpec")
             return None
     return None
-# recruiting/sender.py  (only the changed parts shown; replace the helper)
-from .unsub_links import build_unsub_url  # NEW
+
 
 def _default_list_unsub_values(to_email: str) -> tuple[Optional[str], Optional[str]]:
     """
@@ -93,27 +99,25 @@ def _default_list_unsub_values(to_email: str) -> tuple[Optional[str], Optional[s
 # MIME construction
 # ─────────────────────────────────────────────────────────
 
-def _add_calendar_alternative(alt_container: EmailMessage, *, ics_bytes: bytes) -> None:
-    alt_container.add_attachment(
-        ics_bytes,
-        maintype="text",
-        subtype="calendar",
-        cte="base64",
-        params={"method": "REQUEST", "charset": "UTF-8"},
-        filename="invite.ics",
-    )
-
 def _attach_calendar_part(container: EmailMessage, *, ics_name: str, ics_bytes: bytes) -> None:
+    """
+    Attach ICS as a regular attachment (text/calendar; method=REQUEST).
+    We deliberately do NOT add a text/calendar *alternative* here so that
+    the HTML body remains the primary UI in most clients.
+    """
+    maintype = "text"
+    subtype = "calendar"
     cal = EmailMessage()
     cal.set_content(
         ics_bytes,
-        maintype="text",
-        subtype="calendar",
+        maintype=maintype,
+        subtype=subtype,
         cte="base64",
         params={"method": "REQUEST", "charset": "UTF-8"},
     )
     cal["Content-Disposition"] = f'attachment; filename="{ics_name}"'
     container.attach(cal)
+
 
 def _build_mime(
     *,
@@ -127,7 +131,7 @@ def _build_mime(
     ics: Optional[Union[Tuple[str, bytes], object]],
     list_unsubscribe_url: Optional[str] = None,
     list_unsubscribe_mailto: Optional[str] = None,
-    extra_headers: Optional[Mapping[str, str]] = None,   # ← NEW: arbitrary custom headers
+    extra_headers: Optional[Mapping[str, str]] = None,
 ) -> bytes:
     """
     Build a message with:
@@ -136,7 +140,7 @@ def _build_mime(
             - multipart/alternative (text/plain + text/html)
             - inline images (Content-ID)
           (else) multipart/alternative directly under root
-        - attachments (incl. optional ICS)
+        - attachments (incl. optional ICS as text/calendar attachment)
 
     Adds RFC-compliant List-Unsubscribe headers:
       List-Unsubscribe: <https://...>, <mailto:...>
@@ -146,6 +150,7 @@ def _build_mime(
     root["Subject"] = subject
     root["From"] = settings.SES_SENDER_EMAIL
     root["To"] = to
+
     if getattr(settings, "ECO_LOCAL_REPLY_TO", None):
         root["Reply-To"] = settings.ECO_LOCAL_REPLY_TO
 
@@ -170,23 +175,23 @@ def _build_mime(
         if (list_unsubscribe_url or list_unsubscribe_mailto)
         else _default_list_unsub_values(bare_to)
     )
-    parts = []
+
+    parts: List[str] = []
     if url:
         parts.append(f"<{url}>")
     if mailto:
         parts.append(f"<{mailto}>")
     if parts:
-        # Avoid duplicates; overwrite if already present via extra_headers
         if root.get("List-Unsubscribe"):
             del root["List-Unsubscribe"]
         root["List-Unsubscribe"] = ", ".join(parts)
-        # One-click only valid with HTTPS URL endpoint
         if url:
+            # One-click only valid with HTTPS URL endpoint
             if root.get("List-Unsubscribe-Post"):
                 del root["List-Unsubscribe-Post"]
             root["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
 
-    # Apply any caller-supplied custom headers last (can overwrite above intentionally)
+    # Apply caller-supplied custom headers last (can overwrite above intentionally)
     if extra_headers:
         for k, v in extra_headers.items():
             if not k:
@@ -200,11 +205,10 @@ def _build_mime(
     # multipart/alternative (text/plain + text/html)
     alt = EmailMessage()
     alt.set_content("This email includes an HTML version.", charset="utf-8")
-    # Send HTML as base64 to avoid quoted-printable damage to attributes
     alt.add_alternative(html or "<html></html>", subtype="html", charset="utf-8", cte="base64")
 
     if inline_images:
-        # Ensure multipart/related so CIDs resolve
+        # multipart/related so CIDs resolve
         related = EmailMessage()
         related.make_related()
         related.attach(alt)
@@ -233,12 +237,8 @@ def _build_mime(
             maintype, subtype = guessed.split("/", 1)
 
             img_part = EmailMessage()
-            img_part.set_content(
-                data,
-                maintype=maintype,
-                subtype=subtype,
-                cte="base64",
-            )
+            img_part.set_content(data, maintype=maintype, subtype=subtype, cte="base64")
+
             # Ensure single Content-Disposition header, set to inline
             if img_part.get("Content-Disposition"):
                 del img_part["Content-Disposition"]
@@ -253,12 +253,12 @@ def _build_mime(
     else:
         root.attach(alt)
 
-    # ICS both inline (alternative) and as an attachment so most clients behave well
+    # ICS attachment (no calendar alternative)
     ics_tup = _coerce_ics(ics)
     if ics_tup:
-        _add_calendar_alternative(alt, ics_bytes=ics_tup[1])
         _attach_calendar_part(root, ics_name=ics_tup[0], ics_bytes=ics_tup[1])
 
+    # Regular attachments
     for (fname, mime, content) in (attachments or []):
         maintype, subtype = (mime.split("/", 1) if "/" in mime else ("application", "octet-stream"))
         root.add_attachment(content, maintype=maintype, subtype=subtype, filename=fname)
@@ -266,6 +266,7 @@ def _build_mime(
     raw = root.as_bytes()
     _save_eml_if_enabled(raw, subject)
     return raw
+
 
 # ─────────────────────────────────────────────────────────
 # SES send
@@ -281,14 +282,13 @@ def send_email(
     reply_to_message_id: Optional[str] = None,
     references: Optional[List[str]] = None,
     ics: Optional[Union[Tuple[str, bytes], object]] = None,
-    # Allow callers to force specific List-Unsubscribe values
     list_unsubscribe_url: Optional[str] = None,
     list_unsubscribe_mailto: Optional[str] = None,
-    # NEW: arbitrary additional headers (e.g., X-Campaign, List-ID, etc.)
     extra_headers: Optional[Mapping[str, str]] = None,
 ) -> str:
     """
     Send via SES.
+
     - Raw path for anything that needs threading/attachments/ICS/inline images/custom headers.
     - Simple path for HTML-only mail (note: cannot stamp custom headers on simple path).
     Adds List-Unsubscribe headers automatically if possible.
@@ -298,8 +298,16 @@ def send_email(
         cfg_set = os.getenv("SES_CONFIGURATION_SET")
         bcc_debug = os.getenv("ECO_LOCAL_BCC_DEBUG")
 
-        use_raw = bool(inline_images or attachments or reply_to_message_id or references or ics or extra_headers
-                       or list_unsubscribe_url or list_unsubscribe_mailto)
+        use_raw = bool(
+            inline_images
+            or attachments
+            or reply_to_message_id
+            or references
+            or ics
+            or extra_headers
+            or list_unsubscribe_url
+            or list_unsubscribe_mailto
+        )
 
         if use_raw:
             raw = _build_mime(
@@ -339,7 +347,6 @@ def send_email(
                     [settings.ECO_LOCAL_REPLY_TO] if getattr(settings, "ECO_LOCAL_REPLY_TO", None) else []
                 ),
             }
-            # NB: Simple path cannot set custom headers, so List-Unsubscribe will only be present on the raw path.
             if cfg_set:
                 kwargs2["ConfigurationSetName"] = cfg_set
             resp = _ses.send_email(**kwargs2)

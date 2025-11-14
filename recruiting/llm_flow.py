@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional, Callable, Tuple
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from email.utils import parseaddr
+import re
+
 
 from .branding import header_logo_src_email  # <- email-safe https/data logo
 from .llm_client import generate_json as _gen_json
@@ -347,7 +349,6 @@ def _prompt_analyze_and_plan(env: EmailEnvelope, tz: str, *, semantic_docs: List
         }
     }
     return {"system": system, "user": user}
-
 def _prompt_coordinator_action(
     env: EmailEnvelope,
     plan: AnalysisPlan,
@@ -358,17 +359,15 @@ def _prompt_coordinator_action(
     user_confirmed: bool,
     has_questions: bool,
 ) -> Dict[str, Any]:
-    # NEW ALIGNED SYSTEM PROMPT
     system = (
-        "You are Ecodia, the same warm, passionate, and slightly rebellious community builder from our first email. This is a *conversation*, not a transaction.\n"
-        "The person you're replying to is already engaged. Your goal is to be the *perfect facilitator*—keep the natural, casual, and inspired vibe going. You're not a person, but you are personal and helpful.\n"
+        "You are Ecodia, the same warm, passionate, and slightly rebellious community builder from our first email. "
+        "This is a conversation, not a transaction.\n"
+        "The person you're replying to is already engaged. Your goal is to be the perfect facilitator—keep the natural, casual, and inspired vibe going. "
+        "You're not a person, but you are personal and helpful.\n"
         "Never use corporate clichés or sound like a robot. Avoid em dashes.\n"
-        "If they have questions, answer them clearly using *only* the provided `semantic_context` facts. Don't make things up.\n"
-        "If they're booking a time, your job is to make the handoff to our founder, Tate, feel simple and human. Be helpful, confirm the details, and make it clear you're (Ecodia, the AI) setting up the chat with him (the human).\n"
         "Return JSON only."
     )
 
-    # NEW ALIGNED USER PROMPT
     user = {
         "timezone": tz,
         "current_time_context": _now_plus_7_days(ZoneInfo(tz)),
@@ -376,7 +375,11 @@ def _prompt_coordinator_action(
         "latest_user_email": env.plain_body,
         "initial_plan": asdict(plan),
         "available_slots": [asdict(s) for s in available_slots],
-        "tools_for_action": [asdict(t) for t in _tool_catalog() if ("create" in t.name or "promote" in t.name or "cancel" in t.name)],
+        "tools_for_action": [
+            asdict(t)
+            for t in _tool_catalog()
+            if ("create" in t.name or "promote" in t.name or "cancel" in t.name)
+        ],
         "semantic_context": {
             "top_k": len(semantic_docs),
             "docs": semantic_docs,
@@ -384,58 +387,79 @@ def _prompt_coordinator_action(
         },
         "user_confirmed": bool(user_confirmed),
         "has_questions": bool(has_questions),
-        # --- NEWLY ADDED/UPDATED ---
         "response_requirements": {
             "must_do": [
-                "Always be clear what the next step is. Don't just be friendly, be *helpful*. Make it clear you're offering ECO Local, a way to connect with values-aligned youth."
+                "Always be clear what the next step is. Don't just be friendly, be helpful.",
+                "Your `draft_result.html` must contain at least one meaningful paragraph responding to the user before any signature.",
+                "Do not return an empty or trivial reply. If you're unsure what to say, briefly acknowledge what they wrote and restate the next step."
             ],
             "meeting_rules": [
-                "If action is 'hold' or 'event', add a short `event_description_append` asking for them to shoot over their best phone number, especially if the chat is a call and throw it in the event description. "
-                "Include that Tate's number is 0404247153 if they want to get in contact beforehand.",
+                "If action is 'hold' or 'event', add a short `event_description_append` asking for their best phone number, "
+                "especially if it's a call, and include that Tate's number is 0404247153 if they want to reach him beforehand."
             ],
-            "info_rules": [],
-            "confirmation_rules": []
+            "info_rules": [
+                "Answer explicit questions using only `semantic_context` facts and the email/thread. If a fact is missing, say that you can clarify live rather than inventing details."
+            ],
+            "confirmation_rules": [
+                "If they have already confirmed a time (`user_confirmed` is true), clearly restate the confirmed day/time in the email body."
+            ],
         },
         "ask": [
             "1) Ensure day/date correctness.",
-            "2) List IDs of any `semantic_context.docs` you actually used.",
-            "3) Be warm, natural, and helpful. You are Ecodia, the community facilitator. Your job is to make this process feel easy and inspiring."
+            "2) List IDs of any `semantic_context.docs` you actually used in `facts_used`.",
+            "3) Be warm, natural, and helpful. You are Ecodia, the community facilitator.",
+            "4) Ensure `draft_result.html` has at least one <p> paragraph of meaningful content. Do not leave it empty.",
         ],
-        # --- END OF UPDATE ---
         "return_format": {
             "type": "object",
             "properties": {
                 "booking_decision": {
                     "type": "object",
                     "properties": {
-                        "action": {"enum": ["none", "hold", "event", "promote_hold", "cancel_holds", "cancel_thread_events"]},
+                        "action": {
+                            "enum": [
+                                "none",
+                                "hold",
+                                "event",
+                                "promote_hold",
+                                "cancel_holds",
+                                "cancel_thread_events",
+                            ]
+                        },
                         "chosen_slot": {
                             "type": ["object", "null"],
-                            "properties": {"start": {"type": "string"}, "end": {"type": "string"}, "reason": {"type": "string"}},
-                            "required": ["start", "end", "reason"]
+                            "properties": {
+                                "start": {"type": "string"},
+                                "end": {"type": "string"},
+                                "reason": {"type": "string"},
+                            },
+                            "required": ["start", "end", "reason"],
                         },
                         "location_hint": {"type": ["string", "null"]},
-                        "meeting_type": {"type": ["string", "null"], "enum": ["call", "meeting", None]},
-                        "internal_notes": {"type": ["string", "null"]}
+                        "meeting_type": {
+                            "type": ["string", "null"],
+                            "enum": ["call", "meeting", None],
+                        },
+                        "internal_notes": {"type": ["string", "null"]},
                     },
-                    "required": ["action", "chosen_slot"]
+                    "required": ["action", "chosen_slot"],
                 },
                 "draft_result": {
                     "type": "object",
                     "properties": {
                         "subject": {"type": "string"},
                         "html": {"type": "string"},
-                        # NEW: short, plain text to append into the calendar event description
-                        "event_description_append": {"type": ["string", "null"]}
+                        "event_description_append": {"type": ["string", "null"]},
                     },
-                    "required": ["subject", "html"]
+                    "required": ["subject", "html"],
                 },
-                "facts_used": {"type": "array", "items": {"type": "string"}}
+                "facts_used": {"type": "array", "items": {"type": "string"}},
             },
-            "required": ["booking_decision", "draft_result"]
-        }
+            "required": ["booking_decision", "draft_result"],
+        },
     }
     return {"system": system, "user": user}
+
 
 # ─────────────────────────────────────────────────────────────────────────────-
 # Email polishing (signature + optional time + unsubscribe)
@@ -511,6 +535,19 @@ def _signature_block(to_email: Optional[str]) -> str:
   </table>
 </div>
 """.strip()
+
+def _html_to_plain(s: str) -> str:
+    """
+    Very rough HTML → plain-text stripper for heuristics.
+    Used only to decide if the LLM actually wrote anything.
+    """
+    if not s:
+        return ""
+    # Drop tags
+    text = re.sub(r"<[^>]+>", " ", s)
+    # Collapse whitespace
+    return re.sub(r"\s+", " ", text).strip()
+
 
 def _polish_email_html(html: str, slots: List[CandidateSlot], to_email: Optional[str]) -> str:
     """
@@ -722,23 +759,45 @@ def run_llm_flow(
         internal_notes=b_raw.get("internal_notes"),
     )
     d_raw = final_action_raw.get("draft_result", {})
-    event_desc_append = (d_raw.get("event_description_append") or "").strip() or None  # NEW
+    event_desc_append = (d_raw.get("event_description_append") or "").strip() or None
 
     # 2b) Compute unsubscribe artifacts (URL + headers)
     to_addr_bare = _bare_email(email.to_addr)
     unsubscribe_url = build_unsub_url(email=to_addr_bare) if to_addr_bare else None
     list_unsub_headers = build_list_unsub_headers(to_addr_bare) if to_addr_bare else {}
 
-    # polish the LLM html with signature (incl. unsubscribe) + optional “times” block
-    polished_html = _polish_email_html(
-        d_raw.get("html", "<p>Thanks for your note - here’s a quick summary below.</p>"),
-        all_available_slots,
-        to_addr_bare,
-    )
-    draft = DraftResult(
-        subject=d_raw.get("subject", f"Re: {email.subject}"),
-        html=polished_html,
-    )
+    # --- Subject fallback (avoid double "Re:") ---
+    raw_subject = (d_raw.get("subject") or "").strip()
+    if raw_subject:
+        subj = raw_subject
+    else:
+        base = (email.subject or "").strip()
+        if base and not base.lower().startswith("re:"):
+            subj = f"Re: {base}"
+        else:
+            subj = base or "Quick reply from ECO Local"
+
+    # --- HTML body: treat 'effectively empty' as no draft --------------------
+    raw_html = (d_raw.get("html") or "").strip()
+    plain_from_html = _html_to_plain(raw_html)
+
+    # Heuristic: if the LLM produced nothing or only whitespace, treat as no draft.
+    # This allows the caller (inbox) to skip sending entirely.
+    if not plain_from_html:
+        polished_html = ""
+        log.warning(
+            "[llm_flow] empty or trivial html from coordinator (intent=%s, has_questions=%s); "
+            "subject=%r",
+            plan.intent,
+            plan.has_questions,
+            subj,
+        )
+    else:
+        polished_html = _polish_email_html(raw_html, all_available_slots, to_addr_bare)
+
+    draft = DraftResult(subject=subj, html=polished_html)
+
+
 
     # Execute (optional writes)
     created_ics: Optional[Tuple[str, bytes]] = None

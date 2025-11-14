@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from datetime import date, datetime
 from typing import Dict, Any, Iterable, List, Optional
+import json  # ← add this
+
 import re
 import os
 
@@ -29,6 +31,19 @@ def _run(cy: str, params: Dict[str, Any] | None = None) -> List[Dict[str, Any]]:
         rs = s.run(cy, **(params or {}))
         return [r.data() for r in rs]
 
+
+TEST_EMAIL_ENV = "ECO_LOCAL_TEST_EMAILS"  # comma-separated
+
+def _test_email_whitelist() -> list[str]:
+    """
+    Optional test-only whitelist.
+    If ECO_LOCAL_TEST_EMAILS is set (comma-separated emails),
+    any selector that supports it will ONLY return those emails.
+    """
+    raw = os.getenv(TEST_EMAIL_ENV, "").strip()
+    if not raw:
+        return []
+    return [e.strip().lower() for e in raw.split(",") if e.strip()]
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -211,33 +226,47 @@ def get_max_attempts() -> int:
 # ──────────────────────────────────────────────────────────────────────────────
 # Prospect selection
 # ──────────────────────────────────────────────────────────────────────────────
-
 def select_prospects_for_first_touch(limit: int) -> list[Dict[str, Any]]:
-    cy = """
-    MATCH (p:Prospect)
-    WHERE coalesce(p.qualified, false) = true
-      AND coalesce(p.outreach_started, false) = false
-      AND p.email IS NOT NULL
-    RETURN p
-    ORDER BY p.qualification_score DESC
-    LIMIT $limit
-    """
-    return [r["p"] for r in _run(cy, {"limit": int(limit)})]
+    whitelist = _test_email_whitelist()
+    params: Dict[str, Any] = {"limit": int(limit)}
 
+    if whitelist:
+        cy = """
+        MATCH (p:Prospect)
+        WHERE coalesce(p.qualified, false) = true
+          AND coalesce(p.outreach_started, false) = false
+          AND p.email IS NOT NULL
+          AND toLower(p.email) IN $whitelist
+        OPTIONAL MATCH (p)-[:IN_THREAD]->(t:Thread)
+        RETURN p{.*, thread_id: coalesce(p.thread_id, t.id)} AS p
+        ORDER BY p.qualification_score DESC
+        LIMIT $limit
+        """
+        params["whitelist"] = whitelist
+    else:
+        cy = """
+        MATCH (p:Prospect)
+        WHERE coalesce(p.qualified, false) = true
+          AND coalesce(p.outreach_started, false) = false
+          AND p.email IS NOT NULL
+        OPTIONAL MATCH (p)-[:IN_THREAD]->(t:Thread)
+        RETURN p{.*, thread_id: coalesce(p.thread_id, t.id)} AS p
+        ORDER BY p.qualification_score DESC
+        LIMIT $limit
+        """
 
+    return [r["p"] for r in _run(cy, params)]
 def select_prospects_for_followups(target: date, followup_days: list[int]) -> list[Dict[str, Any]]:
-    """
-    Select prospects where the next follow-up is due on `target`.
+    whitelist = _test_email_whitelist()
+    params: Dict[str, Any] = {
+        "t": target.isoformat(),
+        "days": [int(d) for d in followup_days],
+        "max_attempts": get_max_attempts(),
+    }
 
-    Rules:
-    - If p.next_followup_at exists, we use that (date equality to target).
-    - Otherwise, we derive a due date from last_outreach_at + days[idx],
-      where idx = max(attempt_count - 1, 0). This means:
-        attempt_count=1 (first touch sent)  -> use days[0]
-        attempt_count=2                     -> use days[1]
-        …
-      If idx >= len(days), we clamp to the last delay in the schedule.
-    """
+    if whitelist:
+        params["whitelist"] = whitelist
+
     cy = """
     WITH date($t) AS tgt, $days AS days
     MATCH (p:Prospect)
@@ -246,6 +275,14 @@ def select_prospects_for_followups(target: date, followup_days: list[int]) -> li
       AND coalesce(p.unsubscribed, false) = false
       AND p.email IS NOT NULL
       AND coalesce(p.attempt_count, 0) < $max_attempts
+    """
+
+    if whitelist:
+        cy += """
+      AND toLower(p.email) IN $whitelist
+        """
+
+    cy += """
     WITH p, tgt, days, coalesce(p.attempt_count,0) AS a
 
     WITH p, tgt, days, a,
@@ -269,14 +306,12 @@ def select_prospects_for_followups(target: date, followup_days: list[int]) -> li
          END AS due_date
 
     WHERE due_date = tgt
-    RETURN p
+    OPTIONAL MATCH (p)-[:IN_THREAD]->(t:Thread)
+    RETURN p{.*, thread_id: coalesce(p.thread_id, t.id)} AS p
     """
-    params = {
-        "t": target.isoformat(),
-        "days": [int(d) for d in followup_days],
-        "max_attempts": get_max_attempts(),
-    }
     return [r["p"] for r in _run(cy, params)]
+
+
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -466,24 +501,86 @@ def mark_reply_won(prospect: Dict[str, Any]) -> None:
     cy = "MATCH (p:Prospect {id: $pid}) SET p.won = true, p.won_at = datetime(), p.updated_at = datetime()"
     _run(cy, {"pid": prospect["id"]})
 
+def _to_primitive(value: Any) -> Any:
+    """
+    Recursively convert value into Neo4j/JSON-friendly primitives:
+    - str, int, float, bool, None
+    - lists / dicts of those
+    - dataclasses → dicts
+    - datetime/date → isoformat
+    - everything else → str(value)
+    """
+    from dataclasses import is_dataclass
 
-def log_reply_draft(prospect: Dict[str, Any], message_id: str, html: str) -> None:
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if is_dataclass(value):
+        return {k: _to_primitive(v) for k, v in asdict(value).items()}
+    if isinstance(value, dict):
+        return {str(k): _to_primitive(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_to_primitive(v) for v in value]
+    # fallback: string representation
+    return str(value)
+def log_reply_draft(
+    prospect: Dict[str, Any],
+    *,
+    subject: str,
+    html: str,
+    metadata: Optional[Dict[str, Any]] = None,
+    thread_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """
-    Record that we sent a reply (draft or final) to a prospect, link it to a Thread.
+    Record that we generated/sent a reply (draft or final) to a prospect, and link it to their Thread.
+
+    - Thread is keyed by Prospect.email.
+    - We keep a synthetic message key (subject+timestamp) for now; SES message-id can be patched later.
+    - We store subject + html + metadata_json (stringified JSON) on the Reply node.
     """
+    synthetic_mid = f"{subject}|{datetime.utcnow().isoformat()}"
+
+    # Ensure metadata is fully primitive before serialising
+    meta_prim = _to_primitive(metadata or {})
+    metadata_json = json.dumps(meta_prim, ensure_ascii=False)
+
     cy = """
     MATCH (p:Prospect {id:$pid})
     MERGE (t:Thread {email: p.email})
       ON CREATE SET t.created_at = datetime()
-    SET t.last_outbound_at = datetime()
-    MERGE (m:Reply {message_id:$mid})
+    SET t.last_outbound_at   = datetime(),
+        t.last_outbound_date = date(datetime()),
+        t.id                 = coalesce(t.id, $thread_id)
+
+    MERGE (m:Reply {message_id: $mid})
       ON CREATE SET m.created_at = datetime()
-    SET m.html = $html, m.updated_at = datetime(),
-        m.subject = coalesce(m.subject, '')
+    SET m.subject       = $subject,
+        m.html          = $html,
+        m.metadata_json = $metadata_json,
+        m.updated_at    = datetime()
+
     MERGE (p)-[:IN_THREAD]->(t)
     MERGE (m)-[:IN_THREAD]->(t)
+    RETURN m
     """
-    _run(cy, {"pid": prospect["id"], "mid": message_id, "html": html})
+
+    rows = _run(
+        cy,
+        {
+            "pid": prospect["id"],
+            "mid": synthetic_mid,
+            "subject": subject,
+            "html": html,
+            "metadata_json": metadata_json,
+            "thread_id": thread_id or "",
+        },
+    )
+    return rows[0]["m"] if rows else {}
 
 
 def book_event(prospect: Dict[str, Any], slot: Dict[str, Any]) -> None:
@@ -529,11 +626,11 @@ def upsert_prospect_by_email(email: str, name: Optional[str] = None) -> Dict[str
     """
     return _run(cy, {"email": email, "name": name})[0]["p"]
 
-
 def log_inbound_email(prospect: Dict[str, Any], message: Dict[str, Any]) -> Dict[str, Any]:
     """
     Persist an inbound email node and link it to the Prospect's Thread.
     Creates/updates a Thread (by email) and sets Thread.id if a Gmail thread_id is supplied.
+    Also mirrors the Gmail thread id onto Prospect.thread_id for outreach / context tools.
     Returns the created/merged inbound email projection.
     """
     gid = (message.get("id") or message.get("gmail_id") or "").strip()
@@ -551,7 +648,8 @@ def log_inbound_email(prospect: Dict[str, Any], message: Dict[str, Any]) -> Dict
       ON CREATE SET t.created_at = datetime()
     SET t.last_inbound_at = datetime()
     FOREACH (_ IN CASE WHEN $tid <> '' THEN [1] ELSE [] END |
-      SET t.id = coalesce(t.id, $tid)
+      SET t.id = coalesce(t.id, $tid),
+          p.thread_id = coalesce(p.thread_id, $tid)
     )
 
     // Create inbound email node keyed by Gmail id if available, else by (email+subject+timestamp)
@@ -589,6 +687,7 @@ def log_inbound_email(prospect: Dict[str, Any], message: Dict[str, Any]) -> Dict
         },
     )
     return rows[0]["inbound"] if rows else {}
+
 
 
 def close_driver() -> None:
