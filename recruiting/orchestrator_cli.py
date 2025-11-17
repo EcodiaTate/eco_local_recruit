@@ -141,7 +141,7 @@ def _fmt_range(start: datetime, end: datetime) -> str:
     def hhmm(dt: datetime) -> str:
         h = dt.hour % 12 or 12
         return f"{h}:{dt.minute:02d}" if dt.minute else f"{h}"
-    return f"{start.strftime('%a %d %b')}, {hhmm(start)}{'am' if start.hour < 12 else 'pm'}–{hhmm(end)}{'am' if end.hour < 12 else 'pm'}"
+    return f"{start.strftime('%a %d %b')}, {hhmm(start)}{'am' if start.hour < 12 else 'pm'} - {hhmm(end)}{'am' if end.hour < 12 else 'pm'}"
 
 
 def _print_events(rows: List[Dict[str, Any]]) -> None:
@@ -765,7 +765,7 @@ def _human_label(s: Dict[str, Any]) -> str:
         hm = f"{hh}:{st.minute:02d}" if st.minute else f"{hh}"
         ap = "am" if st.hour < 12 else "pm"
         dd = st.strftime("%a %d %b")
-        window = f"{dd}, {hm}{ap}–{(en.hour % 12 or 12)}{':' + str(en.minute).zfill(2) if en.minute else ''}{'am' if en.hour < 12 else 'pm'}"
+        window = f"{dd}, {hm}{ap} - {(en.hour % 12 or 12)}{':' + str(en.minute).zfill(2) if en.minute else ''}{'am' if en.hour < 12 else 'pm'}"
     except Exception:
         window = f"{s.get('start')} → {s.get('end')}"
     score = s.get("score")

@@ -9,7 +9,6 @@ from typing import Any, Dict, List, Optional, Callable, Tuple
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from email.utils import parseaddr
-import re
 
 
 from .branding import header_logo_src_email  # <- email-safe https/data logo
@@ -84,6 +83,7 @@ class AnalysisPlan:
     facts_needed: Optional[List[str]] = None
     user_confirmed: Optional[bool] = None  # LLM-led, not heuristics
     has_questions: Optional[bool] = None   # explicit boolean
+    is_adhoc: Optional[bool] = False       # New: User wants "call whenever" / no specific slot
 
 
 @dataclass
@@ -311,10 +311,13 @@ def _prompt_analyze_and_plan(env: EmailEnvelope, tz: str, *, semantic_docs: List
             "2) Summarize explicit questions (e.g., pricing, points).",
             "3) Set boolean `has_questions`: true iff the user asked any explicit question.",
             "4) Did the user ALREADY CONFIRM a specific time? Return boolean `user_confirmed`.",
-            "5) If meeting-related or reschedule implied, propose concrete date ranges and build `calendar_queries`.",
-            "6) If meeting-related, identify likely `meeting_type` as 'call' or 'meeting' (in person).",
-            "7) If meeting-related, suggest `location_hint` (business name or empty for call).",
-            "8) Use the previous scheduling context to figure out if the user is talking about this week or next when stating a day.",
+            "5) Check if the user suggests an AD-HOC call (e.g., 'call me whenever', 'try me anytime'). If so, set `is_adhoc`: true.",
+            "6) If meeting-related:",
+            "   - If `is_adhoc` is true: leave `calendar_queries` EMPTY (do not force a schedule).",
+            "   - Otherwise: propose concrete date ranges and build `calendar_queries`.",
+            "7) If meeting-related, identify likely `meeting_type` as 'call' or 'meeting' (in person).",
+            "8) If meeting-related, suggest `location_hint` (business name or empty for call).",
+            "9) Use the previous scheduling context to figure out if the user is talking about this week or next when stating a day.",
         ],
         "tools": [asdict(t) for t in _tool_catalog() if ("search" in t.name or "check" in t.name)],
         "return_format": {
@@ -326,6 +329,7 @@ def _prompt_analyze_and_plan(env: EmailEnvelope, tz: str, *, semantic_docs: List
                 "explicit_questions": {"type": "string"},
                 "has_questions": {"type": "boolean"},
                 "user_confirmed": {"type": "boolean"},
+                "is_adhoc": {"type": "boolean", "description": "True if user says 'call whenever' or similar"},
                 "calendar_queries": {
                     "type": "array",
                     "items": {
@@ -349,6 +353,7 @@ def _prompt_analyze_and_plan(env: EmailEnvelope, tz: str, *, semantic_docs: List
         }
     }
     return {"system": system, "user": user}
+
 def _prompt_coordinator_action(
     env: EmailEnvelope,
     plan: AnalysisPlan,
@@ -387,6 +392,7 @@ def _prompt_coordinator_action(
         },
         "user_confirmed": bool(user_confirmed),
         "has_questions": bool(has_questions),
+        "is_adhoc": bool(plan.is_adhoc),
         "response_requirements": {
             "must_do": [
                 "Always be clear what the next step is. Don't just be friendly, be helpful.",
@@ -394,6 +400,7 @@ def _prompt_coordinator_action(
                 "Do not return an empty or trivial reply. If you're unsure what to say, briefly acknowledge what they wrote and restate the next step."
             ],
             "meeting_rules": [
+                "If `is_adhoc` is true: Do NOT suggest specific slots. Instead, agree to call them loosely or remind them they can call Tate (0404247153).",
                 "If action is 'hold' or 'event', add a short `event_description_append` asking for their best phone number, "
                 "especially if it's a call, and include that Tate's number is 0404247153 if they want to reach him beforehand."
             ],
@@ -476,9 +483,9 @@ def _render_times_block(slots: List[CandidateSlot]) -> str:
             e = datetime.fromisoformat(e_iso.replace("Z", "+00:00"))
             h = lambda dt: (f"{(dt.hour % 12) or 12}:{dt.minute:02d}" if dt.minute else f"{(dt.hour % 12) or 12}") + ("am" if dt.hour < 12 else "pm")
             day = f"{s.strftime('%a')} {s.day} {s.strftime('%b')}"
-            return f"{day}, {h(s)}–{h(e)}"
+            return f"{day}, {h(s)} - {h(e)}"
         except Exception:
-            return f"{s_iso} – {e_iso}"
+            return f"{s_iso} - {e_iso}"
     items = "".join(f"<li>{_label(s.start, s.end)}</li>" for s in slots[:3])
     return (
         '<div data-ecolocal-slots="1" style="margin:16px 0 8px; font-family:Arial,Helvetica,sans-serif;">'
@@ -510,7 +517,6 @@ def _unsubscribe_block(to_email: Optional[str]) -> str:
 
 def _signature_block(to_email: Optional[str]) -> str:
     return f"""
-<!--ECOL_SIGNATURE_START-->
 <div data-ecol-signature="1">
   <table cellpadding="0" cellspacing="0" role="presentation" style="margin-top:16px;">
     <tr>
@@ -555,14 +561,14 @@ def _polish_email_html(html: str, slots: List[CandidateSlot], to_email: Optional
     - If not already present, insert up to 3 varied time options *above* the signature marker.
     """
     out = (html or "")
-    has_sig = ('data-ecol-signature="1"' in out) or ("<!--ECOL_SIGNATURE_START-->" in out)
+    has_sig = ('data-ecol-signature="1"' in out) or ("" in out)
     if not has_sig:
         out = out.rstrip() + "\n" + _signature_block(to_email)
 
     if 'data-ecolocal-slots="1"' not in out:
         times_html = _render_times_block(slots)
         if times_html:
-            out = out.replace("<!--ECOL_SIGNATURE_START-->", times_html + "\n<!--ECOL_SIGNATURE_START-->")
+            out = out.replace("", times_html + "\n")
     return out
 
 # ─────────────────────────────────────────────────────────────────────────────-
@@ -680,6 +686,7 @@ def run_llm_flow(
         facts_needed=a_raw.get("facts_needed") or [],
         user_confirmed=bool(a_raw.get("user_confirmed", False)),
         has_questions=bool(a_raw.get("has_questions", False)),
+        is_adhoc=bool(a_raw.get("is_adhoc", False)),
     )
 
     tool_rounds: List[ToolRound] = []
@@ -710,6 +717,8 @@ def run_llm_flow(
         return calls
 
     all_available_slots: List[CandidateSlot] = []
+    # If user wants "call whenever" (is_adhoc=True), the LLM should have returned
+    # empty calendar_queries anyway, but logic holds.
     if plan.intent == "meeting" and plan.calendar_queries:
         initial_calls = _queries_to_calls(plan.calendar_queries)
         results: Dict[str, Any] = {}
@@ -827,7 +836,7 @@ def run_llm_flow(
                 created_ics = build_ics(ICSSpec(
                     start=s_iso,
                     end=e_iso,
-                    summary=ev.get("summary") or ("Ecodia - intro chat – Call" if mt == "call" else "Ecodia - intro chat"),
+                    summary=ev.get("summary") or ("Ecodia - intro chat - Call" if mt == "call" else "Ecodia - intro chat"),
                     description=desc,
                     location=loc or "",
                     attendee_email=(email.from_addr or None),

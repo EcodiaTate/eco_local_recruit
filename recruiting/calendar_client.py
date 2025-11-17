@@ -301,7 +301,7 @@ def build_calendar_context(
         try:
             s = datetime.fromisoformat(w["start"].replace("Z","+00:00")).astimezone(tz)
             e = datetime.fromisoformat(w["end"].replace("Z","+00:00")).astimezone(tz)
-            readable_windows.append(f"{s.strftime('%a %d %b')}, {s.strftime('%-I:%M%p').lower()}–{e.strftime('%-I:%M%p').lower()}")
+            readable_windows.append(f"{s.strftime('%a %d %b')}, {s.strftime('%-I:%M%p').lower()} - {e.strftime('%-I:%M%p').lower()}")
         except Exception:
             pass
 
@@ -547,7 +547,7 @@ def create_hold(
     # decorate title with meeting type if provided
     mt = (meeting_type or "").lower().strip()
     typetag = "Call" if mt == "call" else ("Meeting" if mt == "meeting" else None)
-    title2 = f"{title} – {typetag}" if typetag and "HOLD" in title else (f"{title} – {typetag}" if typetag else title)
+    title2 = f"{title} - {typetag}" if typetag and "HOLD" in title else (f"{title} - {typetag}" if typetag else title)
 
     ev = create_event(
         title=title2,
@@ -615,7 +615,7 @@ def create_event(
     # decorate title with meeting type for confirmed events too
     mt = (meeting_type or "").lower().strip()
     typetag = "Call" if mt == "call" else ("Meeting" if mt == "meeting" else None)
-    summary = f"{title} – {typetag}" if typetag and typetag not in title else title
+    summary = f"{title} - {typetag}" if typetag and typetag not in title else title
 
     # choose location field
     loc = location_full or location_name or ""

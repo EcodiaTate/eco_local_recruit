@@ -26,7 +26,7 @@ MAX_ATTEMPTS = int(os.getenv("ECO_LOCAL_MAX_ATTEMPTS", "3"))
 
 GOAL = (
     "Our mission is to find and connect with amazing local businesses (like this prospect!) who are genuinely building a better future. "
-    "We're building 'ECO Local' – real local value loops where young people (16–30s) who care about sustainability, community and ethics "
+    "We're building 'ECO Local' - real local value loops where young people (16 - 30s) who care about sustainability, community and ethics "
     "can *actively choose* businesses that walk the talk. "
     "\n\n"
     "ECO Local has two sides:\n"
@@ -172,10 +172,10 @@ def _fmt_range_label(start_iso: str, end_iso: str) -> str:
         s = datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
         e = datetime.fromisoformat(end_iso.replace("Z", "+00:00"))
     except Exception:
-        return f"{start_iso} – {end_iso}"
+        return f"{start_iso} - {end_iso}"
     left = _fmt_hour_min(s)
     right = _fmt_hour_min(e)
-    return f"{_fmt_day(s)}, {left}–{right}"
+    return f"{_fmt_day(s)}, {left} - {right}"
 
 def _time_context() -> Dict[str, Any]:
     now = datetime.now(timezone.utc).astimezone()
