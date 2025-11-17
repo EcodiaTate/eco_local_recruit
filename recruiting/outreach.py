@@ -26,20 +26,35 @@ MAX_ATTEMPTS = int(os.getenv("ECO_LOCAL_MAX_ATTEMPTS", "3"))
 
 GOAL = (
     "Our mission is to find and connect with amazing local businesses (like this prospect!) who are genuinely building a better future. "
-    "We're a movement building 'ECO Local', real 'local value loops' where young people (16-30s) "
-    "who are *actively looking* for sustainable and community-focused businesses can find and support them. "
+    "We're building 'ECO Local' – real local value loops where young people (16–30s) who care about sustainability, community and ethics "
+    "can *actively choose* businesses that walk the talk. "
+    "\n\n"
+    "ECO Local has two sides:\n"
+    "• For young people: a local map + app where they discover aligned cafes, stores and services, earn ECO through real-world sidequests, and redeem it on local offers instead of discounts that race to the bottom.\n"
+    "• For businesses: a way to visibly stand out as a values-led local, be featured on the ECO Local map, and fund small ECO-backed offers that bring in the right kind of regulars (not bargain hunters).\n"
+    "\n"
     "Your main goal is to send a *personal invitation* to see if they want to be part of this. "
     "It's not a hard sell. It's a 'hey, we love what you're doing, and it feels like you'd be a perfect fit for the community we're building.' "
-    "Make them feel *seen* and *invited*, not 'marketed to'. The vibe is community-building. "
-    "The best next steps are for them to signup using the links below or for them to have a quick human intro chat. "
+    "Make them feel *seen* and *invited*, not 'marketed to'. The vibe is community-building and partnership, not pressure. "
+    "\n\n"
+    "You can briefly explain that:\n"
+    "• We're starting on the Sunshine Coast and surrounding areas with a founding group of local businesses.\n"
+    "• It's designed to be low-friction: simple setup, clear offers, no lock-in, and a 'pay what feels fair' contribution model for partners.\n"
+    "• Their involvement helps young people redirect everyday spending towards businesses that are actually doing good.\n"
+    "\n"
+    "The best next steps are for them to either:\n"
+    "• Have a quick human intro chat with our founder, Tate, or\n"
+    "• Skim a bit more and self-serve if they're already keen.\n"
+    "\n"
     "**The core offer is a personal meetup or call with our founder, Tate.** "
     "They can just reply to this email, and you'll set it up. "
     "If they're super keen and want to self-serve, they can also learn more (https://ecodia.au/eco-local) or join directly (https://ecodia.au/join)."
 )
 
+
 # ── Brand voice pack ──────────────────────────────────────────────────────────
 _ECOVOICE_CONTEXT = {
-    "identity": "YOU are Ecodia. You're not a person, you're the *voice* of this movement—a passionate, warm, and slightly rebellious community builder. You're youthful, natural, and genuinely inspired by the local businesses you're talking to. **You are the facilitator making a human connection.**",
+    "identity": "YOU are Ecodia. You're not a person, you're the *voice* of this movement-a passionate, warm, and slightly rebellious community builder. You're youthful, natural, and genuinely inspired by the local businesses you're talking to. **You are the facilitator making a human connection.**",
     "ethos": [
         "Proof, not offsets.",
         "Local value loops.",
@@ -360,7 +375,7 @@ def _candidate_slots_for_email(*, trace_id: Optional[str] = None) -> List[Dict[s
     return _pick_varied_slots(suggestions, max_total=3)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Drafting — First touch
+# Drafting - First touch
 # ─────────────────────────────────────────────────────────────────────────────
 
 def draft_first_touch(prospect: Dict[str, Any], *, trace_id: Optional[str] = None) -> Tuple[str, str]:
@@ -426,14 +441,14 @@ def draft_first_touch(prospect: Dict[str, Any], *, trace_id: Optional[str] = Non
             (f"Quick hello from ECO Local!")
         )
     except Exception:
-        subj, html = ("ECO Local — quick hello", "<p>Hi there, would you be open to a short intro chat?</p>")
+        subj, html = ("ECO Local - quick hello", "<p>Hi there, would you be open to a short intro chat?</p>")
 
     subj = _subject_guard(subj, attempt=1, max_attempts=MAX_ATTEMPTS)
     to_email = prospect.get("email")
     return subj, _polish(html, slots, to_email)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Drafting — Follow-up (reply-shaped; resilient)
+# Drafting - Follow-up (reply-shaped; resilient)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _rehydrate_subject_for_followup(tctx, attempt_no: int, max_attempts: int) -> str:
@@ -469,7 +484,7 @@ def _compose_safe_followup_html(name: Optional[str], when_label: str, allow_pass
     tail = "<br><br>No pressure at all if now's not the right moment." if allow_pass else ""
     return (
         f"<p>Hey {first},</p>"
-        f"<p>Popping back in on this — I know inboxes can be wild places!</p>"
+        f"<p>Popping back in on this - I know inboxes can be wild places!</p>"
         f"<p>Our founder, Tate, would still be really keen to chat for 15 mins about how ECO Local is connecting businesses like yours with values-driven young people. "
         f"Would {when_label} work for a quick intro?</p>"
         f"{tail}"

@@ -113,7 +113,7 @@ def _call_llm(system: str, user: str, *, json_mode: bool = False) -> Dict[str, A
     return {}
 
 # Heuristic cleaner used when LLM off/unavailable
-_SEP_RE = re.compile(r"\s*(\||–|—|-|:)\s*")
+_SEP_RE = re.compile(r"\s*(\||–|-|-|:)\s*")
 _LOC_PAREN_RE = re.compile(r"\s*[\(\[]\s*(sunshine coast|noosa|maroochydore|mooloolaba|caloundra|kawana|peregian|nambour|coolum|australia|qld)\s*[\)\]]\s*", re.I)
 _BAD_TRAILERS = re.compile(r"\s*\b(sunshine coast|qld|australia|official site|home|menu|contact|book now|shop online)\b\s*$", re.I)
 _GENERIC_CATS = re.compile(r"\b(restaurant|cafe|coffee|bakery|barber|butcher|florist|plumbing|electrical|landscap|cleaning|laundry|laundromat|vet|physio|yoga|martial arts|gym|studio|market|bookstore|fishmonger|hardware|tool hire|garden centre|greengrocer|brewery|distillery|e-?bike|repair|device|phone|computer|outdoor gear|delicatessen|deli|cheesemonger|vegan|vegetarian)\b", re.I)

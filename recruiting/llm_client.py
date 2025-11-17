@@ -229,7 +229,7 @@ def _chat_request(
     *, model: str, messages: List[Dict[str, str]], json_mode: bool, max_output_tokens: int, temperature: Optional[float]
 ) -> Tuple[str, Optional[str], Optional[int], Optional[str]]:
     """
-    Chat Completions path — only for non-GPT-5 models. Supports max_completion_tokens and temperature.
+    Chat Completions path - only for non-GPT-5 models. Supports max_completion_tokens and temperature.
     Returns: (text, finish_reason, http_status, error_kind)
     """
     assert not _is_gpt5(model), "Chat Completions should not be used for GPT-5 models."

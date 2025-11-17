@@ -464,7 +464,7 @@ def mark_sent(item: RunItem, message_id: str) -> None:
         t.last_outbound_at   = datetime()
     MERGE (m)-[:IN_THREAD]->(t)
 
-    // 3) Update Prospect (basic stamps ONLY — no attempt_count here)
+    // 3) Update Prospect (basic stamps ONLY - no attempt_count here)
     WITH m, t
     MATCH (p:Prospect {email: m.email})
     SET p.outreach_started = true,
