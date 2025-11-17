@@ -25,7 +25,7 @@ from .calendar_client import (
     build_ics,
     ICSSpec,
 )
-from .unsub_links import build_unsub_url, build_list_unsub_headers  # ← NEW
+from .unsub_links import build_unsub_url, build_list_unsub_headers
 
 log = logging.getLogger(__name__)
 if not logging.getLogger().handlers:
@@ -36,10 +36,9 @@ if not logging.getLogger().handlers:
 # ──────────────────────────────────────────────────────────────────────────────
 
 Json = Dict[str, Any]
-LLMFn = Callable[[Any], Dict[str, Any]]  # accepts str OR list prompt (our _gen_json supports both)
-# Contact phone injected into event descriptions (LLM can also ask for theirs)
+LLMFn = Callable[[Any], Dict[str, Any]]  # accepts str OR list prompt
 CONTACT_PHONE = os.getenv("ECO_LOCAL_SENDER_PHONE", "0404247153").strip()
-
+SIG_MARKER = ""
 
 @dataclass
 class EmailEnvelope:
@@ -81,9 +80,9 @@ class AnalysisPlan:
     confidence: float  # 0..1
     explicit_questions: Optional[str] = ""
     facts_needed: Optional[List[str]] = None
-    user_confirmed: Optional[bool] = None  # LLM-led, not heuristics
-    has_questions: Optional[bool] = None   # explicit boolean
-    is_adhoc: Optional[bool] = False       # New: User wants "call whenever" / no specific slot
+    user_confirmed: Optional[bool] = None
+    has_questions: Optional[bool] = None
+    is_adhoc: Optional[bool] = False  # True = "Call whenever", False = "Book a slot"
 
 
 @dataclass
@@ -134,13 +133,12 @@ class FlowOutput:
     booking: BookingDecision
     draft: DraftResult
     ics: Optional[Tuple[str, bytes]] = None  # build_ics returns (filename, bytes)
-    semantic_context: Optional[List[Dict[str, Any]]] = None  # expose injected facts
-    # NEW: deliver unsubscribe bits to the caller for SES headers, UI, logging, etc.
-    list_unsub_headers: Dict[str, str] = None  # {"List-Unsubscribe": "...", "List-Unsubscribe-Post": "..."}
+    semantic_context: Optional[List[Dict[str, Any]]] = None
+    list_unsub_headers: Dict[str, str] = None
     unsubscribe_url: Optional[str] = None
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Tool inventory (LLM-visible)
+# Tool inventory
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _bare_email(addr: str | None) -> Optional[str]:
@@ -168,17 +166,17 @@ def _tool_catalog() -> List[ToolSpec]:
         ),
         ToolSpec(
             name="calendar.create_hold",
-            description="Place a *tentative* hold. Attaches an .ics (REQUEST). Does NOT send a Google invite.",
+            description="Place a *tentative* hold. Attaches an .ics (REQUEST).",
             args={
                 "start_iso": "string", "end_iso": "string",
                 "summary": "string", "description": "string",
                 "location": "string|null",
-                "meeting_type": "string|null"  # "call" | "meeting"
+                "meeting_type": "string|null"
             },
         ),
         ToolSpec(
             name="calendar.create_event",
-            description="Create a *firm* event. This WILL send a Google invite to the attendee.",
+            description="Create a *firm* event. Sends Google invite.",
             args={
                 "start_iso": "string", "end_iso": "string",
                 "summary": "string", "description": "string",
@@ -188,7 +186,7 @@ def _tool_catalog() -> List[ToolSpec]:
         ),
         ToolSpec(
             name="calendar.promote_hold_to_event",
-            description="Promote an existing HOLD to a firm event and ensure the attendee is on it.",
+            description="Promote an existing HOLD to a firm event.",
             args={"hold_event_id": "string"},
         ),
         ToolSpec(
@@ -204,7 +202,7 @@ def _tool_catalog() -> List[ToolSpec]:
     ]
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Utilities (time, semantics)
+# Utilities
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _now_plus_7_days(tz: ZoneInfo) -> Dict[str, Any]:
@@ -260,7 +258,7 @@ def _trim_doc(d: Dict[str, Any], *, max_chars: int = 1200) -> Dict[str, Any]:
     }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Semantic docs: LOCAL ONLY
+# Semantic docs
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _get_semantic_docs(
@@ -293,7 +291,7 @@ def _prompt_analyze_and_plan(env: EmailEnvelope, tz: str, *, semantic_docs: List
     system = (
         "You are a careful ECO Local coordinator.\n"
         "Use ONLY facts present in `semantic_context` and the user's email/thread.\n"
-        "Return JSON only (no prose outside JSON)."
+        "Return JSON only."
     )
     user = {
         "timezone": tz,
@@ -304,20 +302,20 @@ def _prompt_analyze_and_plan(env: EmailEnvelope, tz: str, *, semantic_docs: List
         "semantic_context": {
             "top_k": len(semantic_docs),
             "docs": semantic_docs,
-            "note": "These are the ONLY allowed reference facts. If a needed fact is absent, say so later."
+            "note": "These are the ONLY allowed reference facts."
         },
         "ask": [
             "1) Identify the primary intent: meeting | info | unsubscribe | other.",
-            "2) Summarize explicit questions (e.g., pricing, points).",
-            "3) Set boolean `has_questions`: true iff the user asked any explicit question.",
-            "4) Did the user ALREADY CONFIRM a specific time? Return boolean `user_confirmed`.",
-            "5) Check if the user suggests an AD-HOC call (e.g., 'call me whenever', 'try me anytime'). If so, set `is_adhoc`: true.",
-            "6) If meeting-related:",
-            "   - If `is_adhoc` is true: leave `calendar_queries` EMPTY (do not force a schedule).",
+            "2) Set boolean `has_questions`: true iff the user asked any explicit question.",
+            "3) Did the user ALREADY CONFIRM a specific time? Return boolean `user_confirmed`.",
+            "4) **Scheduling Strategy**:",
+            "   - **Phone Call**: Default to `is_adhoc: true`. We prefer NOT to book specific slots for calls. Just let them call us at any time. Only set `is_adhoc: false` if they explicitly ask to 'book' a specific time or send a calendar invite.",
+            "   - **In-Person**: Default to `is_adhoc: false` (we must book these).",
+            "5) If meeting-related:",
+            "   - If `is_adhoc` is true: leave `calendar_queries` EMPTY (do not search for slots).",
             "   - Otherwise: propose concrete date ranges and build `calendar_queries`.",
-            "7) If meeting-related, identify likely `meeting_type` as 'call' or 'meeting' (in person).",
-            "8) If meeting-related, suggest `location_hint` (business name or empty for call).",
-            "9) Use the previous scheduling context to figure out if the user is talking about this week or next when stating a day.",
+            "6) Identify likely `meeting_type` as 'call' or 'meeting' (in person).",
+            "7) Suggest `location_hint` (business name or empty for call).",
         ],
         "tools": [asdict(t) for t in _tool_catalog() if ("search" in t.name or "check" in t.name)],
         "return_format": {
@@ -329,7 +327,7 @@ def _prompt_analyze_and_plan(env: EmailEnvelope, tz: str, *, semantic_docs: List
                 "explicit_questions": {"type": "string"},
                 "has_questions": {"type": "boolean"},
                 "user_confirmed": {"type": "boolean"},
-                "is_adhoc": {"type": "boolean", "description": "True if user says 'call whenever' or similar"},
+                "is_adhoc": {"type": "boolean", "description": "True if phone call (unless specific slot requested)"},
                 "calendar_queries": {
                     "type": "array",
                     "items": {
@@ -365,11 +363,8 @@ def _prompt_coordinator_action(
     has_questions: bool,
 ) -> Dict[str, Any]:
     system = (
-        "You are Ecodia, the same warm, passionate, and slightly rebellious community builder from our first email. "
+        "You are Ecodia, the warm, slightly rebellious community builder. "
         "This is a conversation, not a transaction.\n"
-        "The person you're replying to is already engaged. Your goal is to be the perfect facilitator-keep the natural, casual, and inspired vibe going. "
-        "You're not a person, but you are personal and helpful.\n"
-        "Never use corporate clichés or sound like a robot. Avoid em dashes.\n"
         "Return JSON only."
     )
 
@@ -395,28 +390,17 @@ def _prompt_coordinator_action(
         "is_adhoc": bool(plan.is_adhoc),
         "response_requirements": {
             "must_do": [
-                "Always be clear what the next step is. Don't just be friendly, be helpful.",
-                "Your `draft_result.html` must contain at least one meaningful paragraph responding to the user before any signature.",
-                "Do not return an empty or trivial reply. If you're unsure what to say, briefly acknowledge what they wrote and restate the next step."
+                "Be helpful. draft_result.html must have at least one meaningful paragraph.",
             ],
             "meeting_rules": [
-                "If `is_adhoc` is true: Do NOT suggest specific slots. Instead, agree to call them loosely or remind them they can call Tate (0404247153).",
-                "If action is 'hold' or 'event', add a short `event_description_append` asking for their best phone number, "
-                "especially if it's a call, and include that Tate's number is 0404247153 if they want to reach him beforehand."
+                "If `is_adhoc` is true: STOP. Do NOT propose specific times (e.g., 'How about Tuesday?').",
+                "Instead, warmly invite them to call Tate (0404247153) whenever they are free. Do NOT book a 'hold' or 'event'. Set action='none'.",
+                "If `is_adhoc` is false (in-person or specific request): Propose slots or book the confirmed time."
             ],
             "info_rules": [
-                "Answer explicit questions using only `semantic_context` facts and the email/thread. If a fact is missing, say that you can clarify live rather than inventing details."
-            ],
-            "confirmation_rules": [
-                "If they have already confirmed a time (`user_confirmed` is true), clearly restate the confirmed day/time in the email body."
+                "Answer explicit questions using only facts provided."
             ],
         },
-        "ask": [
-            "1) Ensure day/date correctness.",
-            "2) List IDs of any `semantic_context.docs` you actually used in `facts_used`.",
-            "3) Be warm, natural, and helpful. You are Ecodia, the community facilitator.",
-            "4) Ensure `draft_result.html` has at least one <p> paragraph of meaningful content. Do not leave it empty.",
-        ],
         "return_format": {
             "type": "object",
             "properties": {
@@ -424,29 +408,15 @@ def _prompt_coordinator_action(
                     "type": "object",
                     "properties": {
                         "action": {
-                            "enum": [
-                                "none",
-                                "hold",
-                                "event",
-                                "promote_hold",
-                                "cancel_holds",
-                                "cancel_thread_events",
-                            ]
+                            "enum": ["none", "hold", "event", "promote_hold", "cancel_holds", "cancel_thread_events"]
                         },
                         "chosen_slot": {
                             "type": ["object", "null"],
-                            "properties": {
-                                "start": {"type": "string"},
-                                "end": {"type": "string"},
-                                "reason": {"type": "string"},
-                            },
+                            "properties": {"start": {"type": "string"}, "end": {"type": "string"}, "reason": {"type": "string"}},
                             "required": ["start", "end", "reason"],
                         },
                         "location_hint": {"type": ["string", "null"]},
-                        "meeting_type": {
-                            "type": ["string", "null"],
-                            "enum": ["call", "meeting", None],
-                        },
+                        "meeting_type": {"type": ["string", "null"], "enum": ["call", "meeting", None]},
                         "internal_notes": {"type": ["string", "null"]},
                     },
                     "required": ["action", "chosen_slot"],
@@ -472,7 +442,7 @@ def _prompt_coordinator_action(
 # Email polishing (signature + optional time + unsubscribe)
 # ─────────────────────────────────────────────────────────────────────────────-
 
-_LOGO_SRC = header_logo_src_email()  # email-safe https/data
+_LOGO_SRC = header_logo_src_email()
 
 def _render_times_block(slots: List[CandidateSlot]) -> str:
     if not slots:
@@ -483,9 +453,9 @@ def _render_times_block(slots: List[CandidateSlot]) -> str:
             e = datetime.fromisoformat(e_iso.replace("Z", "+00:00"))
             h = lambda dt: (f"{(dt.hour % 12) or 12}:{dt.minute:02d}" if dt.minute else f"{(dt.hour % 12) or 12}") + ("am" if dt.hour < 12 else "pm")
             day = f"{s.strftime('%a')} {s.day} {s.strftime('%b')}"
-            return f"{day}, {h(s)} - {h(e)}"
+            return f"{day}, {h(s)}–{h(e)}"
         except Exception:
-            return f"{s_iso} - {e_iso}"
+            return f"{s_iso} – {e_iso}"
     items = "".join(f"<li>{_label(s.start, s.end)}</li>" for s in slots[:3])
     return (
         '<div data-ecolocal-slots="1" style="margin:16px 0 8px; font-family:Arial,Helvetica,sans-serif;">'
@@ -499,7 +469,7 @@ def _unsubscribe_block(to_email: Optional[str]) -> str:
     url = ""
     if to_email:
         try:
-            url = build_unsub_url(email=to_email)  # includes e, ts, sig
+            url = build_unsub_url(email=to_email)
         except Exception:
             url = ""
 
@@ -517,6 +487,7 @@ def _unsubscribe_block(to_email: Optional[str]) -> str:
 
 def _signature_block(to_email: Optional[str]) -> str:
     return f"""
+{SIG_MARKER}
 <div data-ecol-signature="1">
   <table cellpadding="0" cellspacing="0" role="presentation" style="margin-top:16px;">
     <tr>
@@ -543,32 +514,26 @@ def _signature_block(to_email: Optional[str]) -> str:
 """.strip()
 
 def _html_to_plain(s: str) -> str:
-    """
-    Very rough HTML → plain-text stripper for heuristics.
-    Used only to decide if the LLM actually wrote anything.
-    """
     if not s:
         return ""
-    # Drop tags
     text = re.sub(r"<[^>]+>", " ", s)
-    # Collapse whitespace
     return re.sub(r"\s+", " ", text).strip()
 
 
 def _polish_email_html(html: str, slots: List[CandidateSlot], to_email: Optional[str]) -> str:
-    """
-    - Ensure a branded signature (with unsubscribe) is present.
-    - If not already present, insert up to 3 varied time options *above* the signature marker.
-    """
     out = (html or "")
-    has_sig = ('data-ecol-signature="1"' in out) or ("" in out)
+    # 1. Ensure Signature
+    has_sig = ('data-ecol-signature="1"' in out) or (SIG_MARKER in out)
     if not has_sig:
         out = out.rstrip() + "\n" + _signature_block(to_email)
 
-    if 'data-ecolocal-slots="1"' not in out:
+    # 2. Insert Slots (if any)
+    if slots and 'data-ecolocal-slots="1"' not in out:
         times_html = _render_times_block(slots)
-        if times_html:
-            out = out.replace("", times_html + "\n")
+        # Safely insert using marker constant
+        if times_html and SIG_MARKER in out:
+            out = out.replace(SIG_MARKER, times_html + "\n" + SIG_MARKER)
+            
     return out
 
 # ─────────────────────────────────────────────────────────────────────────────-
@@ -576,7 +541,6 @@ def _polish_email_html(html: str, slots: List[CandidateSlot], to_email: Optional
 # ─────────────────────────────────────────────────────────────────────────────-
 
 def _merge_event_description(base: str, llm_append: Optional[str]) -> str:
-    """Compose the final event description with a consistent phone/request line."""
     base = (base or "").strip()
     extra = (llm_append or "").strip()
     lines = [ln for ln in [base, extra] if ln]
@@ -608,17 +572,12 @@ def _exec_tool_call(call: ToolCall, tz: ZoneInfo, *, thread_id: Optional[str], e
     if name == "calendar.create_hold":
         s = args["start_iso"]; e = args["end_iso"]
         evt = create_hold(
-            start_iso=s,
-            end_iso=e,
-            thread_id=thread_id,
-            prospect_email=attendee_email,
+            start_iso=s, end_iso=e, thread_id=thread_id, prospect_email=attendee_email,
             attendees=([{"email": attendee_email}] if attendee_email else []),
             title=args.get("summary") or "Ecodia - intro chat (HOLD)",
-            description=args.get("description") or "Provisional hold (auto-expires unless confirmed).",
-            tz=str(tz),
-            send_updates="none",
-            meeting_type=(args.get("meeting_type") or None),
-            location_name=(args.get("location") or None),
+            description=args.get("description") or "Provisional hold.",
+            tz=str(tz), send_updates="none",
+            meeting_type=(args.get("meeting_type") or None), location_name=(args.get("location") or None),
         )
         return name, {"event_id": evt.get("id"), "summary": evt.get("summary")}
 
@@ -627,16 +586,11 @@ def _exec_tool_call(call: ToolCall, tz: ZoneInfo, *, thread_id: Optional[str], e
         evt = create_event(
             title=args.get("summary") or "Ecodia - intro chat",
             description=args.get("description") or "Looking forward to meeting you!",
-            start_iso=s,
-            end_iso=e,
-            tz=str(tz),
+            start_iso=s, end_iso=e, tz=str(tz),
             attendees=([{"email": attendee_email}] if attendee_email else []),
-            thread_id=thread_id,
-            prospect_email=attendee_email,
-            kind="CONFIRMED",
-            send_updates="all",
-            meeting_type=(args.get("meeting_type") or None),
-            location_name=(args.get("location") or None),
+            thread_id=thread_id, prospect_email=attendee_email,
+            kind="CONFIRMED", send_updates="all",
+            meeting_type=(args.get("meeting_type") or None), location_name=(args.get("location") or None),
         )
         return name, {"event_id": evt.get("id"), "summary": evt.get("summary")}
 
@@ -717,9 +671,11 @@ def run_llm_flow(
         return calls
 
     all_available_slots: List[CandidateSlot] = []
-    # If user wants "call whenever" (is_adhoc=True), the LLM should have returned
-    # empty calendar_queries anyway, but logic holds.
-    if plan.intent == "meeting" and plan.calendar_queries:
+    
+    # Safety Valve: If logic says 'adhoc', disable slot searching entirely
+    if plan.is_adhoc:
+        all_available_slots = []
+    elif plan.intent == "meeting" and plan.calendar_queries:
         initial_calls = _queries_to_calls(plan.calendar_queries)
         results: Dict[str, Any] = {}
         for idx, c in enumerate(initial_calls):
@@ -770,45 +726,27 @@ def run_llm_flow(
     d_raw = final_action_raw.get("draft_result", {})
     event_desc_append = (d_raw.get("event_description_append") or "").strip() or None
 
-    # 2b) Compute unsubscribe artifacts (URL + headers)
+    # 2b) Unsubscribe bits
     to_addr_bare = _bare_email(email.to_addr)
     unsubscribe_url = build_unsub_url(email=to_addr_bare) if to_addr_bare else None
     list_unsub_headers = build_list_unsub_headers(to_addr_bare) if to_addr_bare else {}
 
-    # --- Subject fallback (avoid double "Re:") ---
+    # --- Subject + HTML Polishing ---
     raw_subject = (d_raw.get("subject") or "").strip()
-    if raw_subject:
-        subj = raw_subject
-    else:
-        base = (email.subject or "").strip()
-        if base and not base.lower().startswith("re:"):
-            subj = f"Re: {base}"
-        else:
-            subj = base or "Quick reply from ECO Local"
+    subj = raw_subject if raw_subject else (f"Re: {email.subject}" if email.subject else "Quick reply")
 
-    # --- HTML body: treat 'effectively empty' as no draft --------------------
     raw_html = (d_raw.get("html") or "").strip()
     plain_from_html = _html_to_plain(raw_html)
 
-    # Heuristic: if the LLM produced nothing or only whitespace, treat as no draft.
-    # This allows the caller (inbox) to skip sending entirely.
     if not plain_from_html:
         polished_html = ""
-        log.warning(
-            "[llm_flow] empty or trivial html from coordinator (intent=%s, has_questions=%s); "
-            "subject=%r",
-            plan.intent,
-            plan.has_questions,
-            subj,
-        )
+        log.warning("[llm_flow] empty html from coordinator.")
     else:
         polished_html = _polish_email_html(raw_html, all_available_slots, to_addr_bare)
 
     draft = DraftResult(subject=subj, html=polished_html)
 
-
-
-    # Execute (optional writes)
+    # Execute writes
     created_ics: Optional[Tuple[str, bytes]] = None
     if allow_calendar_writes and booking.action in ("hold", "event") and booking.chosen_slot:
         try:
@@ -818,61 +756,40 @@ def run_llm_flow(
             loc = booking.location_hint or ""
 
             if booking.action == "hold":
-                base_desc = "Provisional hold (auto-expires unless confirmed)."
+                base_desc = "Provisional hold."
                 desc = _merge_event_description(base_desc, event_desc_append)
                 ev = create_hold(
-                    start_iso=s_iso,
-                    end_iso=e_iso,
-                    thread_id=email.thread_id or None,
+                    start_iso=s_iso, end_iso=e_iso, thread_id=email.thread_id or None,
                     prospect_email=email.from_addr or None,
                     attendees=[{"email": _bare_email(email.from_addr)}] if email.from_addr else [],
-                    title="ECO Local intro chat (hold)",
-                    description=desc,
-                    tz=tz,
-                    send_updates="none",
-                    meeting_type=mt or None,
-                    location_name=loc or None,
+                    title="ECO Local intro chat (hold)", description=desc, tz=tz,
+                    send_updates="none", meeting_type=mt or None, location_name=loc or None,
                 )
                 created_ics = build_ics(ICSSpec(
-                    start=s_iso,
-                    end=e_iso,
-                    summary=ev.get("summary") or ("Ecodia - intro chat - Call" if mt == "call" else "Ecodia - intro chat"),
-                    description=desc,
-                    location=loc or "",
-                    attendee_email=(email.from_addr or None),
-                    method="REQUEST",
+                    start=s_iso, end=e_iso,
+                    summary=ev.get("summary") or ("Ecodia - intro chat – Call" if mt == "call" else "Ecodia - intro chat"),
+                    description=desc, location=loc or "",
+                    attendee_email=(email.from_addr or None), method="REQUEST",
                 ))
-                log.info("Created HOLD + ICS(REQUEST) for %s", s_iso)
+                log.info("Created HOLD for %s", s_iso)
 
             elif booking.action == "event":
                 base_desc = "Looking forward to our chat!"
                 desc = _merge_event_description(base_desc, event_desc_append)
                 create_event(
-                    title="ECO Local intro chat",
-                    description=desc,
-                    start_iso=s_iso,
-                    end_iso=e_iso,
-                    tz=tz,
+                    title="ECO Local intro chat", description=desc,
+                    start_iso=s_iso, end_iso=e_iso, tz=tz,
                     attendees=[{"email": _bare_email(email.from_addr)}] if email.from_addr else [],
-                    thread_id=email.thread_id or None,
-                    prospect_email=email.from_addr or None,
-                    kind="CONFIRMED",
-                    send_updates="all",
-                    meeting_type=mt or None,
-                    location_name=loc or None,
+                    thread_id=email.thread_id or None, prospect_email=email.from_addr or None,
+                    kind="CONFIRMED", send_updates="all",
+                    meeting_type=mt or None, location_name=loc or None,
                 )
-                log.info("Google invite sent for %s by create_event", s_iso)
+                log.info("Created EVENT for %s", s_iso)
 
         except Exception:
             log.exception("calendar write/ICS build failed")
 
     return FlowOutput(
-        plan=plan,
-        tool_rounds=tool_rounds,
-        booking=booking,
-        draft=draft,
-        ics=created_ics,
-        semantic_context=sem_docs,
-        list_unsub_headers=list_unsub_headers,
-        unsubscribe_url=unsubscribe_url,
+        plan=plan, tool_rounds=tool_rounds, booking=booking, draft=draft, ics=created_ics,
+        semantic_context=sem_docs, list_unsub_headers=list_unsub_headers, unsubscribe_url=unsubscribe_url,
     )
